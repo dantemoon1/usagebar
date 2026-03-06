@@ -61,9 +61,12 @@ final class AppModel: ObservableObject {
         Task {
             let updated = await coordinator.loadSnapshot()
 
-            // Track consecutive failures per provider
-            claudeFailures = updated.claude.isAvailable ? 0 : claudeFailures + 1
-            codexFailures = updated.codex.isAvailable ? 0 : codexFailures + 1
+            // Track consecutive auth failures per provider (not rate limits or transient errors)
+            if updated.claude.isAvailable { claudeFailures = 0 }
+            else if updated.claude.isAuthError { claudeFailures += 1 }
+
+            if updated.codex.isAvailable { codexFailures = 0 }
+            else if updated.codex.isAuthError { codexFailures += 1 }
 
             // Keep old good data on transient errors, but replace after threshold
             let claude: ProviderSnapshot

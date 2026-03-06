@@ -21,34 +21,37 @@ public struct CodexAPIProvider: ProviderSnapshotLoader {
                 cred = try await refreshAndSave(cred)
             }
 
-            let (data, status) = try await fetchUsage(accessToken: cred.accessToken, accountId: cred.accountId)
+            let (data, resp) = try await fetchUsage(accessToken: cred.accessToken, accountId: cred.accountId)
+            let status = resp?.statusCode ?? 0
 
             if status == 200 {
                 return try decodeAndBuild(data: data, now: now)
             }
 
             if status == 401 || status == 403 {
-                // Try refresh first
                 if let refreshed = try? await refreshAndSave(cred) {
-                    let (d, s) = try await fetchUsage(accessToken: refreshed.accessToken, accountId: refreshed.accountId)
-                    if s == 200 { return try decodeAndBuild(data: d, now: now) }
+                    let (d, r) = try await fetchUsage(accessToken: refreshed.accessToken, accountId: refreshed.accountId)
+                    if r?.statusCode == 200 { return try decodeAndBuild(data: d, now: now) }
                 }
 
-                // Re-read from disk (Codex CLI may have rotated)
                 if let fresh = try? loadCredential(), fresh.accessToken != cred.accessToken {
-                    let (d, s) = try await fetchUsage(accessToken: fresh.accessToken, accountId: fresh.accountId)
-                    if s == 200 { return try decodeAndBuild(data: d, now: now) }
+                    let (d, r) = try await fetchUsage(accessToken: fresh.accessToken, accountId: fresh.accountId)
+                    if r?.statusCode == 200 { return try decodeAndBuild(data: d, now: now) }
                 }
 
                 throw ProviderError.sessionExpired("Session expired. Run `codex --login` to re-authenticate.")
             }
 
-            if status == 429 { throw ProviderError.rateLimited }
+            if status == 429 {
+                let retryAfter = resp?.value(forHTTPHeaderField: "Retry-After") ?? "not provided"
+                DebugLog.log("[Codex] 429 rate limited — Retry-After: \(retryAfter)")
+                throw ProviderError.rateLimited
+            }
 
             let body = String(data: data, encoding: .utf8) ?? ""
             throw ProviderError.apiError("Codex API returned \(status): \(body)")
         } catch let error as ProviderError {
-            return .unavailable(providerID: .codex, sourceLabel: "Codex API", notes: [error.userMessage])
+            return .unavailable(providerID: .codex, sourceLabel: "Codex API", notes: [error.userMessage], isAuthError: error.isAuthError)
         } catch {
             return .unavailable(providerID: .codex, sourceLabel: "Codex API", notes: [error.localizedDescription])
         }
@@ -165,14 +168,13 @@ public struct CodexAPIProvider: ProviderSnapshotLoader {
 
     // MARK: - API
 
-    private func fetchUsage(accessToken: String, accountId: String?) async throws -> (Data, Int) {
+    private func fetchUsage(accessToken: String, accountId: String?) async throws -> (Data, HTTPURLResponse?) {
         var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("UsageBar/0.1", forHTTPHeaderField: "User-Agent")
         if let accountId { request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id") }
         let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        return (data, status)
+        return (data, response as? HTTPURLResponse)
     }
 
     // MARK: - Snapshot building

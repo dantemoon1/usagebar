@@ -29,14 +29,11 @@ struct DashboardMenuView: View {
             Divider()
 
             HStack {
-                Button("Quit") {
+                MenuItemButton("Quit") {
                     DispatchQueue.main.async {
                         NSApplication.shared.terminate(nil)
                     }
                 }
-                .buttonStyle(.borderless)
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
                 Spacer()
 
@@ -253,5 +250,32 @@ private struct ProviderCardView: View {
                 .foregroundStyle(.secondary)
         }
         .font(.caption)
+    }
+}
+
+/// A button styled like a native NSMenu item with blue highlight on hover.
+private struct MenuItemButton: View {
+    let title: String
+    let action: () -> Void
+    @State private var isHovered = false
+
+    init(_ title: String, action: @escaping () -> Void) {
+        self.title = title
+        self.action = action
+    }
+
+    var body: some View {
+        Text(title)
+            .font(.caption)
+            .foregroundStyle(isHovered ? .white : .secondary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(isHovered ? Color.accentColor : Color.clear)
+            )
+            .contentShape(Rectangle())
+            .onHover { isHovered = $0 }
+            .onTapGesture { action() }
     }
 }

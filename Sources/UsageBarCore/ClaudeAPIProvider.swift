@@ -14,42 +14,72 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
     public init() {}
 
     public func loadSnapshot(now: Date) async -> ProviderSnapshot {
+        DebugLog.trimIfNeeded()
         do {
             var cred = try loadCredential()
+            let tokenPrefix = String(cred.accessToken.prefix(8))
+            let expiresDesc: String
+            if let ea = cred.expiresAt {
+                let remaining = (ea / 1000) - Date().timeIntervalSince1970
+                expiresDesc = String(format: "%.0fs remaining", remaining)
+            } else {
+                expiresDesc = "no expiresAt"
+            }
+            DebugLog.log("[Claude] loaded cred from \(cred.source == .file ? "file" : "keychain"), token=\(tokenPrefix)…, \(expiresDesc), needsRefresh=\(cred.needsRefresh)")
 
             if cred.needsRefresh {
+                DebugLog.log("[Claude] token expired, attempting refresh…")
                 cred = try await refreshAndSave(cred)
+                DebugLog.log("[Claude] refresh OK, new token=\(String(cred.accessToken.prefix(8)))…")
             }
 
-            let (data, status) = try await fetchUsage(accessToken: cred.accessToken)
+            let (data, resp) = try await fetchUsage(accessToken: cred.accessToken)
+            let status = resp?.statusCode ?? 0
+            DebugLog.log("[Claude] usage API returned \(status)")
 
             if status == 200 {
                 return try decodeAndBuild(data: data, now: now)
             }
 
             if status == 401 || status == 403 {
-                // Try refresh first
+                DebugLog.log("[Claude] got \(status), trying refresh…")
                 if let refreshed = try? await refreshAndSave(cred) {
-                    let (d, s) = try await fetchUsage(accessToken: refreshed.accessToken)
+                    DebugLog.log("[Claude] refresh OK after \(status), retrying…")
+                    let (d, r) = try await fetchUsage(accessToken: refreshed.accessToken)
+                    let s = r?.statusCode ?? 0
+                    DebugLog.log("[Claude] retry returned \(s)")
                     if s == 200 { return try decodeAndBuild(data: d, now: now) }
+                } else {
+                    DebugLog.log("[Claude] refresh failed after \(status)")
                 }
 
                 // Re-read from disk (Claude Code may have rotated)
                 if let fresh = try? loadCredential(), fresh.accessToken != cred.accessToken {
-                    let (d, s) = try await fetchUsage(accessToken: fresh.accessToken)
+                    DebugLog.log("[Claude] found different token on disk, retrying…")
+                    let (d, r) = try await fetchUsage(accessToken: fresh.accessToken)
+                    let s = r?.statusCode ?? 0
+                    DebugLog.log("[Claude] disk-retry returned \(s)")
                     if s == 200 { return try decodeAndBuild(data: d, now: now) }
                 }
 
                 throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.")
             }
 
-            if status == 429 { throw ProviderError.rateLimited }
+            if status == 429 {
+                let retryAfter = resp?.value(forHTTPHeaderField: "Retry-After") ?? "not provided"
+                let rateLimitReset = resp?.value(forHTTPHeaderField: "X-RateLimit-Reset") ?? "n/a"
+                let rateLimitRemaining = resp?.value(forHTTPHeaderField: "X-RateLimit-Remaining") ?? "n/a"
+                DebugLog.log("[Claude] 429 rate limited — Retry-After: \(retryAfter), X-RateLimit-Reset: \(rateLimitReset), X-RateLimit-Remaining: \(rateLimitRemaining)")
+                throw ProviderError.rateLimited
+            }
 
             let body = String(data: data, encoding: .utf8) ?? ""
             throw ProviderError.apiError("Claude API returned \(status): \(body)")
         } catch let error as ProviderError {
-            return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.userMessage])
+            DebugLog.log("[Claude] error: \(error.userMessage)")
+            return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.userMessage], isAuthError: error.isAuthError)
         } catch {
+            DebugLog.log("[Claude] unexpected error: \(error.localizedDescription)")
             return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.localizedDescription])
         }
     }
@@ -120,6 +150,7 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
     private func refreshAndSave(_ cred: Credential) async throws -> Credential {
         guard let refreshToken = cred.refreshToken else {
+            DebugLog.log("[Claude] no refreshToken available, cannot refresh")
             throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.")
         }
 
@@ -137,7 +168,11 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else { throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.") }
+        guard status == 200 else {
+            let respBody = String(data: data, encoding: .utf8) ?? ""
+            DebugLog.log("[Claude] token refresh failed with \(status): \(respBody)")
+            throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.")
+        }
 
         let tokenResp = try JSONDecoder().decode(TokenRefreshResponse.self, from: data)
 
@@ -208,14 +243,13 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
     // MARK: - API
 
-    private func fetchUsage(accessToken: String) async throws -> (Data, Int) {
+    private func fetchUsage(accessToken: String) async throws -> (Data, HTTPURLResponse?) {
         var request = URLRequest(url: Self.usageURL)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         request.setValue("UsageBar/0.1", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        return (data, status)
+        return (data, response as? HTTPURLResponse)
     }
 
     // MARK: - Snapshot building
@@ -300,6 +334,13 @@ enum ProviderError: LocalizedError {
     case sessionExpired(String)
     case rateLimited
     case apiError(String)
+
+    var isAuthError: Bool {
+        switch self {
+        case .noCredentials, .sessionExpired: true
+        case .rateLimited, .apiError: false
+        }
+    }
 
     var userMessage: String {
         switch self {

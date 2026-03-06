@@ -56,6 +56,7 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
     public let sourceLabel: String
     public let notes: [String]
     public let metrics: [ExpandedMetric]
+    public let isAuthError: Bool
 
     public init(
         providerID: ProviderID,
@@ -64,7 +65,8 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
         lastUpdatedAt: Date?,
         sourceLabel: String,
         notes: [String] = [],
-        metrics: [ExpandedMetric] = []
+        metrics: [ExpandedMetric] = [],
+        isAuthError: Bool = false
     ) {
         self.providerID = providerID
         self.fiveHourWindow = fiveHourWindow
@@ -73,6 +75,7 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
         self.sourceLabel = sourceLabel
         self.notes = notes
         self.metrics = metrics
+        self.isAuthError = isAuthError
     }
 
     public var isAvailable: Bool {
@@ -86,14 +89,15 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
         }
     }
 
-    public static func unavailable(providerID: ProviderID, sourceLabel: String, notes: [String] = []) -> Self {
+    public static func unavailable(providerID: ProviderID, sourceLabel: String, notes: [String] = [], isAuthError: Bool = false) -> Self {
         ProviderSnapshot(
             providerID: providerID,
             fiveHourWindow: nil,
             sevenDayWindow: nil,
             lastUpdatedAt: nil,
             sourceLabel: sourceLabel,
-            notes: notes
+            notes: notes,
+            isAuthError: isAuthError
         )
     }
 }
