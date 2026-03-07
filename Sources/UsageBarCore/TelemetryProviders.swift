@@ -43,11 +43,14 @@ enum SnapshotCache {
         try? data.write(to: cacheURL, options: .atomic)
     }
 
-    /// Only overwrites each provider's cached data when the new snapshot is available.
+    /// Only preserves cached provider data on transient errors (rate limits, network issues).
+    /// Auth errors overwrite the cache so restarts surface the re-login prompt.
     static func saveSelective(_ snapshot: UsageDashboardSnapshot) {
         let existing = load()
-        let claude = snapshot.claude.isAvailable ? snapshot.claude : (existing?.claude ?? snapshot.claude)
-        let codex = snapshot.codex.isAvailable ? snapshot.codex : (existing?.codex ?? snapshot.codex)
+        let claude = snapshot.claude.isAvailable || snapshot.claude.isAuthError
+            ? snapshot.claude : (existing?.claude ?? snapshot.claude)
+        let codex = snapshot.codex.isAvailable || snapshot.codex.isAuthError
+            ? snapshot.codex : (existing?.codex ?? snapshot.codex)
         let merged = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: snapshot.refreshedAt)
         save(merged)
     }

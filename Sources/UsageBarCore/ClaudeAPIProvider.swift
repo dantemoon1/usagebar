@@ -17,7 +17,6 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
         DebugLog.trimIfNeeded()
         do {
             var cred = try loadCredential()
-            let tokenPrefix = String(cred.accessToken.prefix(8))
             let expiresDesc: String
             if let ea = cred.expiresAt {
                 let remaining = (ea / 1000) - Date().timeIntervalSince1970
@@ -25,12 +24,12 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
             } else {
                 expiresDesc = "no expiresAt"
             }
-            DebugLog.log("[Claude] loaded cred from \(cred.source == .file ? "file" : "keychain"), token=\(tokenPrefix)…, \(expiresDesc), needsRefresh=\(cred.needsRefresh)")
+            DebugLog.log("[Claude] loaded cred from \(cred.source == .file ? "file" : "keychain"), \(expiresDesc), needsRefresh=\(cred.needsRefresh)")
 
             if cred.needsRefresh {
                 DebugLog.log("[Claude] token expired, attempting refresh…")
                 cred = try await refreshAndSave(cred)
-                DebugLog.log("[Claude] refresh OK, new token=\(String(cred.accessToken.prefix(8)))…")
+                DebugLog.log("[Claude] refresh OK")
             }
 
             let (data, resp) = try await fetchUsage(accessToken: cred.accessToken)

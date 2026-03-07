@@ -118,7 +118,17 @@ public struct CodexAPIProvider: ProviderSnapshotLoader {
 
         let (data, response) = try await URLSession.shared.data(for: request)
         let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else { throw ProviderError.sessionExpired("Session expired. Run `codex --login` to re-authenticate.") }
+        switch status {
+        case 200:
+            break
+        case 400, 401, 403:
+            throw ProviderError.sessionExpired("Session expired. Run `codex --login` to re-authenticate.")
+        case 429:
+            throw ProviderError.rateLimited
+        default:
+            let body = String(data: data, encoding: .utf8) ?? ""
+            throw ProviderError.apiError("Codex token refresh returned \(status): \(body)")
+        }
 
         let tokenResp = try JSONDecoder().decode(CodexTokenResponse.self, from: data)
 

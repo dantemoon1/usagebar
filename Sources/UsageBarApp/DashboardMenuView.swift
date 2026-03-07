@@ -79,7 +79,7 @@ struct DashboardMenuView: View {
                 .foregroundStyle(.secondary)
 
             settingRow("Mode") {
-                Picker("", selection: Binding(
+                Picker("Mode", selection: Binding(
                     get: { model.displayMode },
                     set: { model.displayMode = $0 }
                 )) {
@@ -92,7 +92,7 @@ struct DashboardMenuView: View {
 
             if model.displayMode == .single {
                 settingRow("Provider") {
-                    Picker("", selection: Binding(
+                    Picker("Provider", selection: Binding(
                         get: { model.singleBarProvider },
                         set: { model.singleBarProvider = $0 }
                     )) {
@@ -105,7 +105,7 @@ struct DashboardMenuView: View {
             }
 
             settingRow("Colors") {
-                Picker("", selection: Binding(
+                Picker("Colors", selection: Binding(
                     get: { model.colorMode },
                     set: { model.colorMode = $0 }
                 )) {
@@ -118,6 +118,7 @@ struct DashboardMenuView: View {
 
             settingRow("Width") {
                 Slider(value: $model.barWidth, in: 20...60, step: 5)
+                    .accessibilityLabel("Width")
                 Text("\(Int(model.barWidth))")
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)

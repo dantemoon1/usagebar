@@ -51,8 +51,8 @@ final class AppModel: ObservableObject {
     }
 
     var barWidth: Double {
-        get { barWidthRaw }
-        set { barWidthRaw = newValue; objectWillChange.send() }
+        get { min(max(barWidthRaw, 20), 60) }
+        set { barWidthRaw = min(max(newValue, 20), 60); objectWillChange.send() }
     }
 
     func refresh() {
@@ -61,7 +61,7 @@ final class AppModel: ObservableObject {
         Task {
             let updated = await coordinator.loadSnapshot()
 
-            // Track consecutive auth failures per provider (not rate limits or transient errors)
+            // Track auth failures per provider since last success (rate limits/transient errors don't reset the count)
             if updated.claude.isAvailable { claudeFailures = 0 }
             else if updated.claude.isAuthError { claudeFailures += 1 }
 
@@ -104,12 +104,14 @@ final class AppModel: ObservableObject {
 
     private func startRefreshLoop(initialDelay: Int) {
         refreshTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(initialDelay))
-            await MainActor.run { self?.refresh() }
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(180))
+            do {
+                try await Task.sleep(for: .seconds(initialDelay))
                 await MainActor.run { self?.refresh() }
-            }
+                while !Task.isCancelled {
+                    try await Task.sleep(for: .seconds(180))
+                    await MainActor.run { self?.refresh() }
+                }
+            } catch {}
         }
     }
 }
