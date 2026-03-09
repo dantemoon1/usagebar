@@ -34,6 +34,8 @@ final class AppModel: ObservableObject {
 
     /// Tracks which thresholds have already been notified, keyed by "provider-window".
     private var notifiedThresholds: [String: Set<Int>] = [:]
+    /// Whether we've seeded thresholds from the initial snapshot (to avoid burst on launch).
+    private var hasSeededThresholds = false
 
     init() {
         // Load cached data immediately so the UI isn't empty on launch
@@ -165,6 +167,10 @@ final class AppModel: ObservableObject {
     private func checkNotifications(for snapshot: UsageDashboardSnapshot) {
         guard notificationsEnabled else { return }
 
+        // On first check, seed already-passed thresholds so we don't fire a burst of stale alerts.
+        let isFirstCheck = !hasSeededThresholds
+        if isFirstCheck { hasSeededThresholds = true }
+
         for provider in [snapshot.claude, snapshot.codex] {
             for window in [provider.fiveHourWindow, provider.sevenDayWindow].compactMap({ $0 }) {
                 let key = "\(provider.providerID.rawValue)-\(window.kind.rawValue)"
@@ -178,6 +184,8 @@ final class AppModel: ObservableObject {
                 for threshold in Self.notificationThresholds where percent >= threshold {
                     if notifiedThresholds[key, default: []].contains(threshold) { continue }
                     notifiedThresholds[key, default: []].insert(threshold)
+                    // Don't send notifications on first check — just record existing state.
+                    if isFirstCheck { continue }
                     sendNotification(
                         provider: provider.providerID.displayName,
                         window: window.kind.displayName,

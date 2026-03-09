@@ -12,6 +12,8 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
     public func loadSnapshot(now: Date) async -> ProviderSnapshot {
         DebugLog.trimIfNeeded()
 
+        var oauthWasRateLimited = false
+
         // Tier 1: Try OAuth token
         if let cred = loadCredential() {
             DebugLog.log("[Claude] loaded OAuth token")
@@ -24,6 +26,7 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
                 }
                 if status == 429 {
                     DebugLog.log("[Claude] OAuth rate limited, will try cookie fallback")
+                    oauthWasRateLimited = true
                 } else {
                     DebugLog.log("[Claude] OAuth failed with \(status), will try cookie fallback")
                 }
@@ -36,8 +39,17 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
             DebugLog.log("[Claude] no OAuth credentials found, will try cookie fallback")
         }
 
-        // Tier 2: Cookie fallback (implemented in Task 2)
-        return await loadViaCookie(now: now)
+        // Tier 2: Cookie fallback
+        let cookieResult = await loadViaCookie(now: now)
+
+        // If cookie fallback failed due to no credentials but OAuth was just rate-limited,
+        // report rate limit instead of auth error to avoid false re-login prompts.
+        if oauthWasRateLimited && !cookieResult.isAvailable && cookieResult.isAuthError {
+            return .unavailable(providerID: .claude, sourceLabel: "Claude API",
+                                notes: ["Rate limited. Will retry on next refresh."])
+        }
+
+        return cookieResult
     }
 
     // MARK: - Credential model
@@ -86,7 +98,10 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
     private static let cookieFileURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".usagebar")
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
         return dir.appendingPathComponent("claude-cookie.txt")
     }()
 
@@ -97,11 +112,6 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
     }
 
     public static func saveCookie(_ cookie: String) {
-        let dir = cookieFileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(
-            at: dir, withIntermediateDirectories: true,
-            attributes: [.posixPermissions: 0o700]
-        )
         let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
         if let data = trimmed.data(using: .utf8) {
             FileManager.default.createFile(
