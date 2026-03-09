@@ -140,14 +140,16 @@ final class AppModel: ObservableObject {
     }
 
     func validateCookie() {
-        guard !claudeCookie.isEmpty else {
+        let cookie = claudeCookie
+
+        guard !cookie.isEmpty else {
             cookieValidation = .none
             return
         }
 
         // Check for required cookie fields
-        let hasSessionKey = claudeCookie.contains("sessionKey=")
-        let hasLastActiveOrg = claudeCookie.contains("lastActiveOrg=")
+        let hasSessionKey = cookie.contains("sessionKey=")
+        let hasLastActiveOrg = cookie.contains("lastActiveOrg=")
         guard hasSessionKey, hasLastActiveOrg else {
             cookieValidation = .invalid("Cookie missing required fields (sessionKey, lastActiveOrg)")
             return
@@ -155,8 +157,9 @@ final class AppModel: ObservableObject {
 
         // Extract org ID and try hitting the API
         cookieValidation = .validating
-        Task {
-            let result = await ClaudeAPIProvider.validateCookie(claudeCookie)
+        Task { [cookie] in
+            let result = await ClaudeAPIProvider.validateCookie(cookie)
+            guard self.claudeCookie == cookie else { return }
             self.cookieValidation = result ? .valid : .invalid("API request failed. Cookie may be expired.")
             if result { self.refresh() }
         }
