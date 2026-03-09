@@ -14,6 +14,7 @@ final class AppModel: ObservableObject {
         codex: .unavailable(providerID: .codex, sourceLabel: "Loading..."),
         refreshedAt: Date()
     )
+    @Published var claudeCookie: String = ""
     @Published private(set) var isRefreshing = false
     @Published private(set) var claudeFailures = 0
     @Published private(set) var codexFailures = 0
@@ -29,6 +30,7 @@ final class AppModel: ObservableObject {
         if let cached = coordinator.loadCachedSnapshot() {
             snapshot = cached
         }
+        claudeCookie = loadStoredCookie()
         // Delay first API call to avoid rate limits on rapid restarts
         startRefreshLoop(initialDelay: 5)
     }
@@ -100,6 +102,22 @@ final class AppModel: ObservableObject {
         case .claude: snapshot.claude
         case .codex: snapshot.codex
         }
+    }
+
+    private func loadStoredCookie() -> String {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".usagebar/claude-cookie.txt")
+        return (try? String(contentsOf: url, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    func saveClaudeCookie(_ cookie: String) {
+        claudeCookie = cookie
+        ClaudeAPIProvider.saveCookie(cookie)
+    }
+
+    func clearClaudeCookie() {
+        claudeCookie = ""
+        ClaudeAPIProvider.clearCookie()
     }
 
     private func startRefreshLoop(initialDelay: Int) {

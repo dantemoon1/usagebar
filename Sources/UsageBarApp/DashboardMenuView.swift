@@ -12,7 +12,9 @@ struct DashboardMenuView: View {
                 title: "Claude",
                 snapshot: model.snapshot.claude,
                 tint: BarPalette.tint(for: .claude, mode: model.colorMode),
-                reloginHint: model.claudeNeedsRelogin ? "Run `claude` then `/login`" : nil
+                reloginHint: model.claudeNeedsRelogin
+                    ? "Run `claude login` or paste a cookie below"
+                    : nil
             )
 
             ProviderCardView(
@@ -130,6 +132,43 @@ struct DashboardMenuView: View {
                 set: { LaunchAtLogin.setEnabled($0) }
             ))
             .font(.caption)
+
+            Divider()
+
+            Text("Claude Cookie")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            if model.claudeCookie.isEmpty {
+                Text("Paste your claude.ai cookie for fallback auth when OAuth expires.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            } else {
+                HStack {
+                    Text("Cookie set ✓")
+                        .font(.caption2)
+                        .foregroundStyle(.green)
+                    Spacer()
+                    MenuItemButton("Clear") {
+                        model.clearClaudeCookie()
+                    }
+                }
+            }
+
+            HStack {
+                MenuItemButton("Paste Cookie") {
+                    if let str = NSPasteboard.general.string(forType: .string), !str.isEmpty {
+                        model.saveClaudeCookie(str)
+                        model.refresh()
+                    }
+                }
+
+                Spacer()
+
+                MenuItemButton("How?") {
+                    NSWorkspace.shared.open(URL(string: "https://claude.ai/settings")!)
+                }
+            }
         }
     }
 
