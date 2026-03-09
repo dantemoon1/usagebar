@@ -181,7 +181,7 @@ public struct CodexAPIProvider: ProviderSnapshotLoader {
     private func fetchUsage(accessToken: String, accountId: String?) async throws -> (Data, HTTPURLResponse?) {
         var request = URLRequest(url: URL(string: "https://chatgpt.com/backend-api/wham/usage")!)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue("UsageBar/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("UsageBar/0.2", forHTTPHeaderField: "User-Agent")
         if let accountId { request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id") }
         let (data, response) = try await URLSession.shared.data(for: request)
         return (data, response as? HTTPURLResponse)

@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import UserNotifications
 import UsageBarCore
 
 @MainActor
@@ -8,12 +9,16 @@ final class AppModel: ObservableObject {
     @AppStorage("singleBarProvider") var singleBarProviderRawValue = ProviderID.claude.rawValue
     @AppStorage("colorMode") var colorModeRawValue = ColorMode.color.rawValue
     @AppStorage("barWidth") var barWidthRaw: Double = 30
+    @AppStorage("notificationsEnabled") var notificationsEnabled = true
 
     @Published private(set) var snapshot = UsageDashboardSnapshot(
         claude: .unavailable(providerID: .claude, sourceLabel: "Loading..."),
         codex: .unavailable(providerID: .codex, sourceLabel: "Loading..."),
         refreshedAt: Date()
     )
+    @Published var claudeCookie: String = ""
+    @Published private(set) var cookieValidation: CookieValidation = .none
+    @Published private(set) var notificationsDenied = false
     @Published private(set) var isRefreshing = false
     @Published private(set) var claudeFailures = 0
     @Published private(set) var codexFailures = 0
@@ -24,11 +29,21 @@ final class AppModel: ObservableObject {
     /// Number of consecutive failures before showing re-login prompt.
     private static let failureThreshold = 3
 
+    /// Thresholds at which to send notifications (percentage).
+    private static let notificationThresholds = [50, 75, 90, 95, 99]
+
+    /// Tracks which thresholds have already been notified, keyed by "provider-window".
+    private var notifiedThresholds: [String: Set<Int>] = [:]
+    /// Whether we've seeded thresholds from the initial snapshot (to avoid burst on launch).
+    private var hasSeededThresholds = false
+
     init() {
         // Load cached data immediately so the UI isn't empty on launch
         if let cached = coordinator.loadCachedSnapshot() {
             snapshot = cached
         }
+        claudeCookie = loadStoredCookie()
+        if notificationsEnabled { requestNotificationPermission() }
         // Delay first API call to avoid rate limits on rapid restarts
         startRefreshLoop(initialDelay: 5)
     }
@@ -87,7 +102,9 @@ final class AppModel: ObservableObject {
                 codex = updated.codex
             }
 
-            self.snapshot = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: updated.refreshedAt)
+            let newSnapshot = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: updated.refreshedAt)
+            self.snapshot = newSnapshot
+            self.checkNotifications(for: newSnapshot)
             self.isRefreshing = false
         }
     }
@@ -99,6 +116,120 @@ final class AppModel: ObservableObject {
         switch providerID {
         case .claude: snapshot.claude
         case .codex: snapshot.codex
+        }
+    }
+
+    private func loadStoredCookie() -> String {
+        let url = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".usagebar/claude-cookie.txt")
+        return (try? String(contentsOf: url, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    }
+
+    func saveClaudeCookie(_ cookie: String) {
+        DebugLog.log("[Claude] cookie pasted (\(cookie.count) chars)")
+        claudeCookie = cookie
+        ClaudeAPIProvider.saveCookie(cookie)
+        validateCookie()
+    }
+
+    func clearClaudeCookie() {
+        DebugLog.log("[Claude] cookie cleared by user")
+        claudeCookie = ""
+        cookieValidation = .none
+        ClaudeAPIProvider.clearCookie()
+    }
+
+    func validateCookie() {
+        let cookie = claudeCookie
+
+        guard !cookie.isEmpty else {
+            cookieValidation = .none
+            return
+        }
+
+        // Check for required cookie fields
+        let hasSessionKey = cookie.contains("sessionKey=")
+        let hasLastActiveOrg = cookie.contains("lastActiveOrg=")
+        guard hasSessionKey, hasLastActiveOrg else {
+            cookieValidation = .invalid("Cookie missing required fields (sessionKey, lastActiveOrg)")
+            return
+        }
+
+        // Extract org ID and try hitting the API
+        cookieValidation = .validating
+        Task { [cookie] in
+            let result = await ClaudeAPIProvider.validateCookie(cookie)
+            guard self.claudeCookie == cookie else { return }
+            self.cookieValidation = result ? .valid : .invalid("API request failed. Cookie may be expired.")
+            if result { self.refresh() }
+        }
+    }
+
+    // MARK: - Notifications
+
+    private func checkNotifications(for snapshot: UsageDashboardSnapshot) {
+        guard notificationsEnabled else { return }
+
+        // On first check, seed already-passed thresholds so we don't fire a burst of stale alerts.
+        let isFirstCheck = !hasSeededThresholds
+        if isFirstCheck { hasSeededThresholds = true }
+
+        for provider in [snapshot.claude, snapshot.codex] {
+            for window in [provider.fiveHourWindow, provider.sevenDayWindow].compactMap({ $0 }) {
+                let key = "\(provider.providerID.rawValue)-\(window.kind.rawValue)"
+                let percent = Int(window.usedPercent)
+
+                // Reset tracked thresholds if usage dropped (new reset window)
+                if let existing = notifiedThresholds[key], let maxNotified = existing.max(), percent < maxNotified - 10 {
+                    notifiedThresholds[key] = []
+                }
+
+                for threshold in Self.notificationThresholds where percent >= threshold {
+                    if notifiedThresholds[key, default: []].contains(threshold) { continue }
+                    notifiedThresholds[key, default: []].insert(threshold)
+                    // Don't send notifications on first check — just record existing state.
+                    if isFirstCheck { continue }
+                    sendNotification(
+                        provider: provider.providerID.displayName,
+                        window: window.kind.displayName,
+                        percent: percent,
+                        threshold: threshold
+                    )
+                }
+            }
+        }
+    }
+
+    private func sendNotification(provider: String, window: String, percent: Int, threshold: Int) {
+        DebugLog.log("[Notifications] sending: \(provider) \(window) at \(percent)% (threshold \(threshold)%)")
+        let content = UNMutableNotificationContent()
+        content.title = "\(provider) Usage: \(percent)%"
+        content.body = "\(window) window has reached \(threshold)% usage."
+        content.sound = .default
+
+        let request = UNNotificationRequest(
+            identifier: "\(provider)-\(window)-\(threshold)",
+            content: content,
+            trigger: nil
+        )
+        UNUserNotificationCenter.current().add(request)
+    }
+
+    func requestNotificationPermission() {
+        DebugLog.log("[Notifications] requesting permission")
+        let center = UNUserNotificationCenter.current()
+        center.requestAuthorization(options: [.alert, .sound]) { [weak self] granted, _ in
+            DebugLog.log("[Notifications] permission granted: \(granted)")
+            Task { @MainActor in
+                self?.notificationsDenied = !granted
+            }
+        }
+    }
+
+    func checkNotificationPermission() {
+        Task {
+            let settings = await UNUserNotificationCenter.current().notificationSettings()
+            self.notificationsDenied = settings.authorizationStatus == .denied
         }
     }
 
@@ -114,6 +245,13 @@ final class AppModel: ObservableObject {
             } catch {}
         }
     }
+}
+
+enum CookieValidation: Equatable {
+    case none
+    case validating
+    case valid
+    case invalid(String)
 }
 
 enum DisplayMode: String, CaseIterable {

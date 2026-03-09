@@ -1,6 +1,6 @@
 import Foundation
 
-enum DebugLog {
+public enum DebugLog {
     private static let queue = DispatchQueue(label: "usagebar.debug-log")
 
     private static let logURL: URL = {
@@ -20,7 +20,7 @@ enum DebugLog {
         return f
     }()
 
-    static func log(_ message: String) {
+    public static func log(_ message: String) {
         queue.sync {
             let timestamp = formatter.string(from: Date())
             let line = "[\(timestamp)] \(message)\n"
@@ -43,7 +43,7 @@ enum DebugLog {
     }
 
     /// Truncate log if it gets too large (> 2MB)
-    static func trimIfNeeded() {
+    public static func trimIfNeeded() {
         queue.sync {
             guard let attrs = try? FileManager.default.attributesOfItem(atPath: logURL.path),
                   let size = attrs[.size] as? Int, size > 2_000_000 else { return }
