@@ -17,6 +17,9 @@ mkdir -p "$APP_BUNDLE/Contents/Resources"
 cp "$BUILD_DIR/UsageBarApp" "$APP_BUNDLE/Contents/MacOS/UsageBarApp"
 cp "$SCRIPT_DIR/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 
+echo "Signing app bundle..."
+codesign --force --deep --sign - "$APP_BUNDLE"
+
 echo "App bundle created at: $APP_BUNDLE"
 echo ""
 echo "To install, run:"

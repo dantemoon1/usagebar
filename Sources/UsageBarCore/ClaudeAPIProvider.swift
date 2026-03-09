@@ -23,14 +23,11 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
                     return try decodeAndBuild(data: data, now: now, source: "Claude API (OAuth)")
                 }
                 if status == 429 {
-                    throw ProviderError.rateLimited
+                    DebugLog.log("[Claude] OAuth rate limited, will try cookie fallback")
+                } else {
+                    DebugLog.log("[Claude] OAuth failed with \(status), will try cookie fallback")
                 }
-                DebugLog.log("[Claude] OAuth failed with \(status), will try cookie fallback")
             } catch let error as ProviderError {
-                if case .rateLimited = error {
-                    DebugLog.log("[Claude] error: \(error.userMessage)")
-                    return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.userMessage])
-                }
                 DebugLog.log("[Claude] OAuth error: \(error.userMessage), will try cookie fallback")
             } catch {
                 DebugLog.log("[Claude] OAuth error: \(error.localizedDescription), will try cookie fallback")
@@ -112,7 +109,7 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
     // MARK: - Org ID extraction
 
-    private func extractOrgId(from cookie: String) -> String? {
+    private static func extractOrgId(from cookie: String) -> String? {
         for part in cookie.components(separatedBy: ";") {
             let trimmed = part.trimmingCharacters(in: .whitespaces)
             if trimmed.hasPrefix("lastActiveOrg=") {
@@ -120,6 +117,30 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
             }
         }
         return nil
+    }
+
+    // MARK: - Cookie validation
+
+    /// Validates a cookie by making a test request to the claude.ai usage API.
+    public static func validateCookie(_ cookie: String) async -> Bool {
+        guard let orgId = extractOrgId(from: cookie) else { return false }
+        guard let url = URL(string: "\(webUsageURLBase)\(orgId)/usage") else { return false }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue(cookie, forHTTPHeaderField: "Cookie")
+        request.setValue("*/*", forHTTPHeaderField: "Accept")
+        request.setValue("https://claude.ai", forHTTPHeaderField: "Origin")
+        request.setValue("https://claude.ai", forHTTPHeaderField: "Referer")
+        request.setValue("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36", forHTTPHeaderField: "User-Agent")
+        do {
+            let (_, response) = try await URLSession.shared.data(for: request)
+            let status = (response as? HTTPURLResponse)?.statusCode ?? 0
+            DebugLog.log("[Claude] cookie validation returned \(status)")
+            return status == 200
+        } catch {
+            DebugLog.log("[Claude] cookie validation error: \(error.localizedDescription)")
+            return false
+        }
     }
 
     // MARK: - Cookie fallback
@@ -130,10 +151,10 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
         guard let cookie = loadCookie() else {
             DebugLog.log("[Claude] no cookie stored")
             return .unavailable(providerID: .claude, sourceLabel: "Claude API",
-                                notes: ["No credentials available. Set a browser cookie in settings or run `claude login`."],
+                                notes: ["No credentials available. Set a browser cookie in settings or run `claude` then `/login`."],
                                 isAuthError: true)
         }
-        guard let orgId = extractOrgId(from: cookie) else {
+        guard let orgId = Self.extractOrgId(from: cookie) else {
             DebugLog.log("[Claude] cookie missing lastActiveOrg")
             return .unavailable(providerID: .claude, sourceLabel: "Claude API",
                                 notes: ["Cookie missing org ID. Re-copy the full cookie from claude.ai."],

@@ -12,5 +12,11 @@ struct UsageBarApp: App {
             BarIconView(model: model)
         }
         .menuBarExtraStyle(.window)
+
+        Window("UsageBar Settings", id: "settings") {
+            SettingsView(model: model)
+        }
+        .windowResizability(.contentSize)
+        .defaultPosition(.center)
     }
 }
