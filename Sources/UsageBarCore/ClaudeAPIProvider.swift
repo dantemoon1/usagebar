@@ -98,9 +98,17 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
     public static func saveCookie(_ cookie: String) {
         let dir = cookieFileURL.deletingLastPathComponent()
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        try? cookie.trimmingCharacters(in: .whitespacesAndNewlines)
-            .write(to: cookieFileURL, atomically: true, encoding: .utf8)
+        try? FileManager.default.createDirectory(
+            at: dir, withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        let trimmed = cookie.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let data = trimmed.data(using: .utf8) {
+            FileManager.default.createFile(
+                atPath: cookieFileURL.path, contents: data,
+                attributes: [.posixPermissions: 0o600]
+            )
+        }
     }
 
     public static func clearCookie() {
