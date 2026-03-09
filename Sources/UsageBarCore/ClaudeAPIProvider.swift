@@ -2,120 +2,66 @@ import Foundation
 
 /// Fetches Claude Code quota data via the OAuth usage endpoint.
 /// Reads credentials from ~/.claude/.credentials.json or Keychain.
-/// Refreshes expired tokens automatically and saves back to the original source.
+/// Falls back to cookie-based approach if OAuth token is unavailable or fails.
 public struct ClaudeAPIProvider: ProviderSnapshotLoader {
     private static let keychainService = "Claude Code-credentials"
-    private static let clientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-    private static let scopes = "user:profile user:inference user:sessions:claude_code"
-    private static let tokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
     private static let usageURL = URL(string: "https://api.anthropic.com/api/oauth/usage")!
-    private static let refreshBufferMs: Double = 5 * 60 * 1000
 
     public init() {}
 
     public func loadSnapshot(now: Date) async -> ProviderSnapshot {
         DebugLog.trimIfNeeded()
-        do {
-            var cred = try loadCredential()
-            let expiresDesc: String
-            if let ea = cred.expiresAt {
-                let remaining = (ea / 1000) - Date().timeIntervalSince1970
-                expiresDesc = String(format: "%.0fs remaining", remaining)
-            } else {
-                expiresDesc = "no expiresAt"
-            }
-            DebugLog.log("[Claude] loaded cred from \(cred.source == .file ? "file" : "keychain"), \(expiresDesc), needsRefresh=\(cred.needsRefresh)")
 
-            if cred.needsRefresh {
-                DebugLog.log("[Claude] token expired, attempting refresh…")
-                cred = try await refreshAndSave(cred)
-                DebugLog.log("[Claude] refresh OK")
-            }
-
-            let (data, resp) = try await fetchUsage(accessToken: cred.accessToken)
-            let status = resp?.statusCode ?? 0
-            DebugLog.log("[Claude] usage API returned \(status)")
-
-            if status == 200 {
-                return try decodeAndBuild(data: data, now: now)
-            }
-
-            if status == 401 || status == 403 {
-                DebugLog.log("[Claude] got \(status), trying refresh…")
-                if let refreshed = try? await refreshAndSave(cred) {
-                    DebugLog.log("[Claude] refresh OK after \(status), retrying…")
-                    let (d, r) = try await fetchUsage(accessToken: refreshed.accessToken)
-                    let s = r?.statusCode ?? 0
-                    DebugLog.log("[Claude] retry returned \(s)")
-                    if s == 200 { return try decodeAndBuild(data: d, now: now) }
-                } else {
-                    DebugLog.log("[Claude] refresh failed after \(status)")
+        // Tier 1: Try OAuth token
+        if let cred = loadCredential() {
+            DebugLog.log("[Claude] loaded OAuth token")
+            do {
+                let (data, resp) = try await fetchUsage(accessToken: cred.accessToken)
+                let status = resp?.statusCode ?? 0
+                DebugLog.log("[Claude] OAuth API returned \(status)")
+                if status == 200 {
+                    return try decodeAndBuild(data: data, now: now, source: "Claude API (OAuth)")
                 }
-
-                // Re-read from disk (Claude Code may have rotated)
-                if let fresh = try? loadCredential(), fresh.accessToken != cred.accessToken {
-                    DebugLog.log("[Claude] found different token on disk, retrying…")
-                    let (d, r) = try await fetchUsage(accessToken: fresh.accessToken)
-                    let s = r?.statusCode ?? 0
-                    DebugLog.log("[Claude] disk-retry returned \(s)")
-                    if s == 200 { return try decodeAndBuild(data: d, now: now) }
+                if status == 429 {
+                    throw ProviderError.rateLimited
                 }
-
-                throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.")
+                DebugLog.log("[Claude] OAuth failed with \(status), will try cookie fallback")
+            } catch let error as ProviderError {
+                if case .rateLimited = error {
+                    DebugLog.log("[Claude] error: \(error.userMessage)")
+                    return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.userMessage])
+                }
+                DebugLog.log("[Claude] OAuth error: \(error.userMessage), will try cookie fallback")
+            } catch {
+                DebugLog.log("[Claude] OAuth error: \(error.localizedDescription), will try cookie fallback")
             }
-
-            if status == 429 {
-                let retryAfter = resp?.value(forHTTPHeaderField: "Retry-After") ?? "not provided"
-                let rateLimitReset = resp?.value(forHTTPHeaderField: "X-RateLimit-Reset") ?? "n/a"
-                let rateLimitRemaining = resp?.value(forHTTPHeaderField: "X-RateLimit-Remaining") ?? "n/a"
-                DebugLog.log("[Claude] 429 rate limited — Retry-After: \(retryAfter), X-RateLimit-Reset: \(rateLimitReset), X-RateLimit-Remaining: \(rateLimitRemaining)")
-                throw ProviderError.rateLimited
-            }
-
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw ProviderError.apiError("Claude API returned \(status): \(body)")
-        } catch let error as ProviderError {
-            DebugLog.log("[Claude] error: \(error.userMessage)")
-            return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.userMessage], isAuthError: error.isAuthError)
-        } catch {
-            DebugLog.log("[Claude] unexpected error: \(error.localizedDescription)")
-            return .unavailable(providerID: .claude, sourceLabel: "Claude API", notes: [error.localizedDescription])
+        } else {
+            DebugLog.log("[Claude] no OAuth credentials found, will try cookie fallback")
         }
+
+        // Tier 2: Cookie fallback (implemented in Task 2)
+        return await loadViaCookie(now: now)
     }
 
     // MARK: - Credential model
 
-    private enum CredentialSource: Sendable {
-        case file, keychain
-    }
-
     private struct Credential: Sendable {
         let accessToken: String
-        let refreshToken: String?
-        let expiresAt: Double? // milliseconds since epoch
-        let rawData: Data // original JSON for field-preserving write-back
-        let source: CredentialSource
-
-        var needsRefresh: Bool {
-            guard let expiresAt else { return true }
-            let nowMs = Date().timeIntervalSince1970 * 1000
-            return nowMs + ClaudeAPIProvider.refreshBufferMs >= expiresAt
-        }
     }
 
     // MARK: - Loading credentials
 
-    private func loadCredential() throws -> Credential {
+    private func loadCredential() -> Credential? {
         if let cred = loadFromFile() { return cred }
         if let cred = loadFromKeychain() { return cred }
-        throw ProviderError.noCredentials("Run `claude login` in Terminal to authenticate.")
+        return nil
     }
 
     private func loadFromFile() -> Credential? {
         let credPath = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".claude/.credentials.json")
         guard let data = try? Data(contentsOf: credPath) else { return nil }
-        return parseCredential(from: data, source: .file)
+        return parseCredential(from: data)
     }
 
     private func loadFromKeychain() -> Credential? {
@@ -129,115 +75,22 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
         process.waitUntilExit()
         guard process.terminationStatus == 0 else { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return parseCredential(from: data, source: .keychain)
+        return parseCredential(from: data)
     }
 
-    private func parseCredential(from data: Data, source: CredentialSource) -> Credential? {
+    private func parseCredential(from data: Data) -> Credential? {
         guard let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let oauth = dict["claudeAiOauth"] as? [String: Any],
               let accessToken = oauth["accessToken"] as? String else { return nil }
-        return Credential(
-            accessToken: accessToken,
-            refreshToken: oauth["refreshToken"] as? String,
-            expiresAt: oauth["expiresAt"] as? Double,
-            rawData: data,
-            source: source
-        )
+        return Credential(accessToken: accessToken)
     }
 
-    // MARK: - Token refresh
+    // MARK: - Cookie fallback
 
-    private func refreshAndSave(_ cred: Credential) async throws -> Credential {
-        guard let refreshToken = cred.refreshToken else {
-            DebugLog.log("[Claude] no refreshToken available, cannot refresh")
-            throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.")
-        }
-
-        var request = URLRequest(url: Self.tokenURL)
-        request.httpMethod = "POST"
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        let body: [String: String] = [
-            "grant_type": "refresh_token",
-            "refresh_token": refreshToken,
-            "client_id": Self.clientID,
-            "scope": Self.scopes,
-        ]
-        request.httpBody = try JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
-        let status = (response as? HTTPURLResponse)?.statusCode ?? 0
-        guard status == 200 else {
-            let respBody = String(data: data, encoding: .utf8) ?? ""
-            DebugLog.log("[Claude] token refresh failed with \(status): \(respBody)")
-            throw ProviderError.sessionExpired("Session expired. Run `claude login` to re-authenticate.")
-        }
-
-        let tokenResp = try JSONDecoder().decode(TokenRefreshResponse.self, from: data)
-
-        let newExpiresAt: Double?
-        if let expiresIn = tokenResp.expiresIn {
-            newExpiresAt = Date().timeIntervalSince1970 * 1000 + Double(expiresIn) * 1000
-        } else {
-            newExpiresAt = cred.expiresAt
-        }
-
-        // Reconstruct JSON preserving unknown fields
-        let newRawData = updatedRawData(
-            from: cred.rawData,
-            accessToken: tokenResp.accessToken,
-            refreshToken: tokenResp.refreshToken ?? refreshToken,
-            expiresAt: newExpiresAt
-        )
-
-        let newCred = Credential(
-            accessToken: tokenResp.accessToken,
-            refreshToken: tokenResp.refreshToken ?? refreshToken,
-            expiresAt: newExpiresAt,
-            rawData: newRawData,
-            source: cred.source
-        )
-
-        saveCredential(newCred)
-        return newCred
-    }
-
-    private func updatedRawData(from original: Data, accessToken: String, refreshToken: String?, expiresAt: Double?) -> Data {
-        guard var dict = try? JSONSerialization.jsonObject(with: original) as? [String: Any] else { return original }
-        var oauth = (dict["claudeAiOauth"] as? [String: Any]) ?? [:]
-        oauth["accessToken"] = accessToken
-        if let refreshToken { oauth["refreshToken"] = refreshToken }
-        if let expiresAt { oauth["expiresAt"] = expiresAt }
-        dict["claudeAiOauth"] = oauth
-        return (try? JSONSerialization.data(withJSONObject: dict, options: .prettyPrinted)) ?? original
-    }
-
-    // MARK: - Saving credentials
-
-    private func saveCredential(_ cred: Credential) {
-        switch cred.source {
-        case .file:
-            let credPath = FileManager.default.homeDirectoryForCurrentUser
-                .appendingPathComponent(".claude/.credentials.json")
-            try? cred.rawData.write(to: credPath, options: .atomic)
-        case .keychain:
-            guard let json = String(data: cred.rawData, encoding: .utf8) else { return }
-            let del = Process()
-            del.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            del.arguments = ["delete-generic-password", "-s", Self.keychainService]
-            del.standardOutput = Pipe()
-            del.standardError = Pipe()
-            try? del.run()
-            del.waitUntilExit()
-
-            let add = Process()
-            add.executableURL = URL(fileURLWithPath: "/usr/bin/security")
-            add.arguments = ["add-generic-password", "-s", Self.keychainService, "-w", json]
-            add.standardOutput = Pipe()
-            add.standardError = Pipe()
-            try? add.run()
-            add.waitUntilExit()
-        }
+    private func loadViaCookie(now: Date) async -> ProviderSnapshot {
+        return .unavailable(providerID: .claude, sourceLabel: "Claude API",
+                            notes: ["No credentials available. Run `claude login` or set a browser cookie."],
+                            isAuthError: true)
     }
 
     // MARK: - API
@@ -253,12 +106,12 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
 
     // MARK: - Snapshot building
 
-    private func decodeAndBuild(data: Data, now: Date) throws -> ProviderSnapshot {
+    private func decodeAndBuild(data: Data, now: Date, source: String = "Claude API") throws -> ProviderSnapshot {
         let usage = try JSONDecoder().decode(ClaudeUsageResponse.self, from: data)
-        return buildSnapshot(from: usage, now: now)
+        return buildSnapshot(from: usage, now: now, sourceLabel: source)
     }
 
-    private func buildSnapshot(from usage: ClaudeUsageResponse, now: Date) -> ProviderSnapshot {
+    private func buildSnapshot(from usage: ClaudeUsageResponse, now: Date, sourceLabel: String) -> ProviderSnapshot {
         let fiveHour = usage.fiveHour.map {
             QuotaWindowSnapshot(kind: .fiveHour, usedPercent: $0.utilization, resetAt: $0.parsedResetDate)
         }
@@ -280,24 +133,13 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
             fiveHourWindow: fiveHour,
             sevenDayWindow: sevenDay,
             lastUpdatedAt: now,
-            sourceLabel: "Claude API",
+            sourceLabel: sourceLabel,
             metrics: metrics
         )
     }
 }
 
 // MARK: - JSON Models
-
-private struct TokenRefreshResponse: Decodable {
-    let accessToken: String
-    let refreshToken: String?
-    let expiresIn: Int?
-    private enum CodingKeys: String, CodingKey {
-        case accessToken = "access_token"
-        case refreshToken = "refresh_token"
-        case expiresIn = "expires_in"
-    }
-}
 
 private struct ClaudeUsageResponse: Decodable {
     let fiveHour: UsageWindow?; let sevenDay: UsageWindow?; let extraUsage: ExtraUsage?
