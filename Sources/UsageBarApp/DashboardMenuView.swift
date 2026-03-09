@@ -36,7 +36,7 @@ struct DashboardMenuView: View {
 
                 Spacer()
 
-                Text("v0.1")
+                Text("v0.2")
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 

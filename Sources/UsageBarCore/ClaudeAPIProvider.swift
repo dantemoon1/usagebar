@@ -207,7 +207,7 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
         var request = URLRequest(url: Self.usageURL)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
-        request.setValue("UsageBar/0.1", forHTTPHeaderField: "User-Agent")
+        request.setValue("UsageBar/0.2", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
         return (data, response as? HTTPURLResponse)
     }
