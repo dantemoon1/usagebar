@@ -45,9 +45,13 @@ struct BarIconView: View {
         let maxLabelWidth = [claudeLabel, codexLabel, singleLabel]
             .compactMap { labelWidth(for: $0) }
             .max() ?? 0
+        let maxLabelHeight = [claudeLabel, codexLabel, singleLabel]
+            .compactMap { labelHeight(for: $0) }
+            .max() ?? 0
+        let rowHeight = max(barHeight, maxLabelHeight)
 
         let isDual = model.displayMode == .dual
-        let totalHeight = isDual ? barHeight * 2 + spacing + padding * 2 : barHeight + padding * 2
+        let totalHeight = isDual ? rowHeight * 2 + spacing + padding * 2 : rowHeight + padding * 2
         let totalWidth = barWidth + padding * 2 + (maxLabelWidth > 0 ? labelGap + maxLabelWidth : 0)
 
         let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
@@ -68,9 +72,11 @@ struct BarIconView: View {
                 let y: CGFloat
                 if isDual {
                     // First bar at top, second at bottom (flipped coords: bottom = lower y)
-                    y = index == 0 ? padding + barHeight + spacing : padding
+                    y = index == 0
+                        ? padding + rowHeight + spacing + (rowHeight - barHeight) / 2
+                        : padding + (rowHeight - barHeight) / 2
                 } else {
-                    y = padding
+                    y = padding + (rowHeight - barHeight) / 2
                 }
 
                 let trackRect = NSRect(x: padding, y: y, width: barWidth, height: barHeight)
@@ -99,14 +105,14 @@ struct BarIconView: View {
             switch model.displayMode {
             case .single:
                 if let singleLabel {
-                    drawLabel(singleLabel, x: labelX, midY: totalHeight / 2)
+                    drawLabel(singleLabel, x: labelX, midY: padding + rowHeight / 2)
                 }
             case .dual:
                 if let claudeLabel {
-                    drawLabel(claudeLabel, x: labelX, midY: padding + barHeight + spacing + (barHeight / 2))
+                    drawLabel(claudeLabel, x: labelX, midY: padding + rowHeight + spacing + rowHeight / 2)
                 }
                 if let codexLabel {
-                    drawLabel(codexLabel, x: labelX, midY: padding + (barHeight / 2))
+                    drawLabel(codexLabel, x: labelX, midY: padding + rowHeight / 2)
                 }
             }
 
@@ -120,6 +126,11 @@ struct BarIconView: View {
     private func labelWidth(for spec: LabelSpec?) -> CGFloat? {
         guard let spec else { return nil }
         return attributedLabel(spec).size().width
+    }
+
+    private func labelHeight(for spec: LabelSpec?) -> CGFloat? {
+        guard let spec else { return nil }
+        return attributedLabel(spec).size().height
     }
 
     private func drawLabel(_ spec: LabelSpec, x: CGFloat, midY: CGFloat) {

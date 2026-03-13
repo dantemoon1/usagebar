@@ -120,7 +120,7 @@ final class AppModel: ObservableObject {
 
             let newSnapshot = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: updated.refreshedAt)
             self.snapshot = newSnapshot
-            self.usageHistory.record(newSnapshot)
+            self.usageHistory.record(updated)
             self.checkNotifications(for: newSnapshot)
             self.isRefreshing = false
         }

@@ -30,7 +30,8 @@ public struct UsageHistory: Sendable {
               let entries = try? JSONDecoder().decode([HistoryEntry].self, from: data) else {
             return []
         }
-        return entries
+        let cutoff = Date().addingTimeInterval(-Self.maxAge)
+        return entries.filter { $0.timestamp >= cutoff }
     }
 
     /// Returns recent percentage values for a specific provider + window.
