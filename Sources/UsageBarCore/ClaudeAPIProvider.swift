@@ -118,6 +118,10 @@ public struct ClaudeAPIProvider: ProviderSnapshotLoader {
                 atPath: cookieFileURL.path, contents: data,
                 attributes: [.posixPermissions: 0o600]
             )
+            // Safety net: ensure permissions even if createFile ignores attributes
+            try? FileManager.default.setAttributes(
+                [.posixPermissions: 0o600], ofItemAtPath: cookieFileURL.path
+            )
         }
     }
 

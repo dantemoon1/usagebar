@@ -44,6 +44,21 @@ struct SettingsView: View {
                         .foregroundStyle(.secondary)
                         .frame(width: 32, alignment: .trailing)
                 }
+
+                Toggle("Sparklines", isOn: $model.sparklinesEnabled)
+
+                SparklineView(
+                    values: [12, 14, 18, 22, 21, 30, 35, 33, 42, 48, 55, 53, 60, 68, 72, 71, 75, 78],
+                    tint: BarPalette.tint(for: .claude, mode: model.colorMode)
+                )
+                .frame(height: 24)
+                .opacity(model.sparklinesEnabled ? 1 : 0.4)
+
+                Text("24h usage trend shown per quota window.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+
+                Toggle("Show percentage in menu bar", isOn: $model.showPercentageLabel)
             }
 
             Section("Claude Cookie") {
@@ -120,7 +135,16 @@ struct SettingsView: View {
                             .buttonStyle(.link)
                         }
                     } else {
-                        Text("Alerts at 50%, 75%, 90%, 95%, 99% for each quota window.")
+                        Picker("Thresholds", selection: Binding(
+                            get: { model.notificationPreset },
+                            set: { model.notificationPreset = $0 }
+                        )) {
+                            ForEach(NotificationPreset.allCases, id: \.self) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+
+                        Text(model.notificationPreset.caption)
                             .font(.caption)
                             .foregroundStyle(.tertiary)
                     }

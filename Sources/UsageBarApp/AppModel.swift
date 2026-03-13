@@ -10,6 +10,9 @@ final class AppModel: ObservableObject {
     @AppStorage("colorMode") var colorModeRawValue = ColorMode.color.rawValue
     @AppStorage("barWidth") var barWidthRaw: Double = 30
     @AppStorage("notificationsEnabled") var notificationsEnabled = true
+    @AppStorage("sparklinesEnabled") var sparklinesEnabled = false
+    @AppStorage("showPercentageLabel") var showPercentageLabel = false
+    @AppStorage("notificationPreset") var notificationPresetRaw = NotificationPreset.standard.rawValue
 
     @Published private(set) var snapshot = UsageDashboardSnapshot(
         claude: .unavailable(providerID: .claude, sourceLabel: "Loading..."),
@@ -24,13 +27,12 @@ final class AppModel: ObservableObject {
     @Published private(set) var codexFailures = 0
 
     private let coordinator = TelemetryCoordinator()
+    let usageHistory = UsageHistory()
     private var refreshTask: Task<Void, Never>?
+    private var cookieValidationTask: Task<Void, Never>?
 
     /// Number of consecutive failures before showing re-login prompt.
     private static let failureThreshold = 3
-
-    /// Thresholds at which to send notifications (percentage).
-    private static let notificationThresholds = [50, 75, 90, 95, 99]
 
     /// Tracks which thresholds have already been notified, keyed by "provider-window".
     private var notifiedThresholds: [String: Set<Int>] = [:]
@@ -48,7 +50,21 @@ final class AppModel: ObservableObject {
         startRefreshLoop(initialDelay: 5)
     }
 
-    deinit { refreshTask?.cancel() }
+    deinit {
+        refreshTask?.cancel()
+        cookieValidationTask?.cancel()
+    }
+
+    var notificationPreset: NotificationPreset {
+        get { NotificationPreset(rawValue: notificationPresetRaw) ?? .standard }
+        set {
+            guard notificationPresetRaw != newValue.rawValue else { return }
+            notificationPresetRaw = newValue.rawValue
+            notifiedThresholds.removeAll()
+            hasSeededThresholds = false
+            objectWillChange.send()
+        }
+    }
 
     var displayMode: DisplayMode {
         get { DisplayMode(rawValue: displayModeRawValue) ?? .single }
@@ -104,13 +120,11 @@ final class AppModel: ObservableObject {
 
             let newSnapshot = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: updated.refreshedAt)
             self.snapshot = newSnapshot
+            self.usageHistory.record(updated)
             self.checkNotifications(for: newSnapshot)
             self.isRefreshing = false
         }
     }
-
-    var claudeNeedsRelogin: Bool { claudeFailures >= Self.failureThreshold }
-    var codexNeedsRelogin: Bool { codexFailures >= Self.failureThreshold }
 
     func providerSnapshot(for providerID: ProviderID) -> ProviderSnapshot {
         switch providerID {
@@ -134,6 +148,8 @@ final class AppModel: ObservableObject {
 
     func clearClaudeCookie() {
         DebugLog.log("[Claude] cookie cleared by user")
+        cookieValidationTask?.cancel()
+        cookieValidationTask = nil
         claudeCookie = ""
         cookieValidation = .none
         ClaudeAPIProvider.clearCookie()
@@ -156,10 +172,11 @@ final class AppModel: ObservableObject {
         }
 
         // Extract org ID and try hitting the API
+        cookieValidationTask?.cancel()
         cookieValidation = .validating
-        Task { [cookie] in
+        cookieValidationTask = Task { [cookie] in
             let result = await ClaudeAPIProvider.validateCookie(cookie)
-            guard self.claudeCookie == cookie else { return }
+            guard !Task.isCancelled, self.claudeCookie == cookie else { return }
             self.cookieValidation = result ? .valid : .invalid("API request failed. Cookie may be expired.")
             if result { self.refresh() }
         }
@@ -169,6 +186,8 @@ final class AppModel: ObservableObject {
 
     private func checkNotifications(for snapshot: UsageDashboardSnapshot) {
         guard notificationsEnabled else { return }
+        let thresholds = notificationPreset.thresholds
+        guard !thresholds.isEmpty else { return }
 
         // On first check, seed already-passed thresholds so we don't fire a burst of stale alerts.
         let isFirstCheck = !hasSeededThresholds
@@ -184,11 +203,17 @@ final class AppModel: ObservableObject {
                     notifiedThresholds[key] = []
                 }
 
-                for threshold in Self.notificationThresholds where percent >= threshold {
+                // Collect all newly-crossed thresholds, but only notify for the highest
+                var highestNew: Int?
+                for threshold in thresholds where percent >= threshold {
                     if notifiedThresholds[key, default: []].contains(threshold) { continue }
                     notifiedThresholds[key, default: []].insert(threshold)
-                    // Don't send notifications on first check — just record existing state.
-                    if isFirstCheck { continue }
+                    if !isFirstCheck {
+                        highestNew = threshold
+                    }
+                }
+
+                if let threshold = highestNew {
                     sendNotification(
                         provider: provider.providerID.displayName,
                         window: window.kind.displayName,
@@ -233,13 +258,25 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// Returns refresh interval: 60s when any window is above 80%, 180s otherwise.
+    private var adaptiveRefreshInterval: Int {
+        let maxUsage = [
+            snapshot.claude.fiveHourWindow?.usedPercent,
+            snapshot.claude.sevenDayWindow?.usedPercent,
+            snapshot.codex.fiveHourWindow?.usedPercent,
+            snapshot.codex.sevenDayWindow?.usedPercent,
+        ].compactMap { $0 }.max() ?? 0
+        return maxUsage >= 80 ? 60 : 180
+    }
+
     private func startRefreshLoop(initialDelay: Int) {
         refreshTask = Task { [weak self] in
             do {
                 try await Task.sleep(for: .seconds(initialDelay))
                 await MainActor.run { self?.refresh() }
                 while !Task.isCancelled {
-                    try await Task.sleep(for: .seconds(180))
+                    let interval = await MainActor.run { self?.adaptiveRefreshInterval ?? 180 }
+                    try await Task.sleep(for: .seconds(interval))
                     await MainActor.run { self?.refresh() }
                 }
             } catch {}
@@ -270,6 +307,37 @@ enum ColorMode: String, CaseIterable {
         switch self {
         case .color: "Color"
         case .monochrome: "Mono"
+        }
+    }
+}
+
+enum NotificationPreset: String, CaseIterable {
+    case standard, conservative, minimal, off
+
+    var title: String {
+        switch self {
+        case .standard: "Standard"
+        case .conservative: "Conservative"
+        case .minimal: "Minimal"
+        case .off: "Off"
+        }
+    }
+
+    var thresholds: [Int] {
+        switch self {
+        case .standard: [50, 75, 90, 95, 99]
+        case .conservative: [75, 90, 95]
+        case .minimal: [90, 99]
+        case .off: []
+        }
+    }
+
+    var caption: String {
+        switch self {
+        case .standard: "Alerts at 50%, 75%, 90%, 95%, 99%"
+        case .conservative: "Alerts at 75%, 90%, 95%"
+        case .minimal: "Alerts at 90%, 99%"
+        case .off: "No usage notifications"
         }
     }
 }

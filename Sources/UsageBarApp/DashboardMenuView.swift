@@ -5,6 +5,18 @@ struct DashboardMenuView: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
+    private var appVersionText: String {
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        if let shortVersion, !shortVersion.isEmpty {
+            if let buildVersion, !buildVersion.isEmpty, buildVersion != shortVersion {
+                return "v\(shortVersion) (\(buildVersion))"
+            }
+            return "v\(shortVersion)"
+        }
+        return "v?"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -13,16 +25,16 @@ struct DashboardMenuView: View {
                 title: "Claude",
                 snapshot: model.snapshot.claude,
                 tint: BarPalette.tint(for: .claude, mode: model.colorMode),
-                reloginHint: model.claudeNeedsRelogin
-                    ? "Run `claude` then `/login`, or set a cookie in Settings"
-                    : nil
+                history: model.usageHistory,
+                sparklinesEnabled: model.sparklinesEnabled
             )
 
             ProviderCardView(
                 title: "Codex",
                 snapshot: model.snapshot.codex,
                 tint: BarPalette.tint(for: .codex, mode: model.colorMode),
-                reloginHint: model.codexNeedsRelogin ? "Run `codex --login`" : nil
+                history: model.usageHistory,
+                sparklinesEnabled: model.sparklinesEnabled
             )
 
             Divider()
@@ -36,7 +48,7 @@ struct DashboardMenuView: View {
 
                 Spacer()
 
-                Text("v0.2")
+                Text(appVersionText)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 
@@ -84,21 +96,18 @@ private struct ProviderCardView: View {
     let title: String
     let snapshot: ProviderSnapshot
     let tint: Color
-    var reloginHint: String? = nil
+    var history: UsageHistory? = nil
+    var sparklinesEnabled: Bool = true
+
+    private var errorKind: ErrorKind { snapshot.errorKind }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(title)
                 .font(.subheadline.weight(.semibold))
 
-            if let hint = reloginHint {
-                HStack(spacing: 4) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(.orange)
-                    Text(hint)
-                }
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            if errorKind != .none {
+                errorBanner
             }
 
             if snapshot.fiveHourWindow != nil || snapshot.sevenDayWindow != nil {
@@ -110,7 +119,7 @@ private struct ProviderCardView: View {
                 metricRow(label: metric.label, value: metric.value)
             }
 
-            if reloginHint == nil, !snapshot.notes.isEmpty {
+            if errorKind == .none, !snapshot.notes.isEmpty {
                 ForEach(snapshot.notes, id: \.self) { note in
                     Text(note)
                         .font(.caption2)
@@ -168,13 +177,45 @@ private struct ProviderCardView: View {
             }
             .frame(height: 6)
 
-            if let window, let resetAt = window.resetAt {
-                let resetText = kind == .fiveHour
-                    ? UsageBarFormatting.shortResetText(for: resetAt)
-                    : UsageBarFormatting.longResetText(for: resetAt)
-                Text("Resets \(resetText)")
+            if sparklinesEnabled, let history, window != nil {
+                let values = history.values(provider: snapshot.providerID, window: kind)
+                if values.count >= 2 {
+                    SparklineView(values: values, tint: tint)
+                        .frame(height: 20)
+                }
+            }
+
+            if let window {
+                if window.usedPercent >= 100, let resetAt = window.resetAt,
+                   let countdown = UsageBarFormatting.countdownText(until: resetAt) {
+                    HStack(spacing: 4) {
+                        Image(systemName: "hourglass")
+                            .foregroundStyle(.orange)
+                        Text("Resets in \(countdown)")
+                    }
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.secondary)
+                } else {
+                    HStack(spacing: 4) {
+                        if let resetAt = window.resetAt {
+                            let resetText = kind == .fiveHour
+                                ? UsageBarFormatting.shortResetText(for: resetAt)
+                                : UsageBarFormatting.longResetText(for: resetAt)
+                            Text("Resets \(resetText)")
+                        }
+                        if let history,
+                           let rate = history.burnRate(provider: snapshot.providerID, window: kind, currentPercent: window.usedPercent),
+                           showBurnRate(rate: rate, resetAt: window.resetAt) {
+                            if window.resetAt != nil {
+                                Text("·")
+                            }
+                            Text(rate.projectionText)
+                                .foregroundStyle(.orange.opacity(0.8))
+                        }
+                    }
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
+                }
             }
         }
     }
@@ -187,6 +228,98 @@ private struct ProviderCardView: View {
                 .foregroundStyle(.secondary)
         }
         .font(.caption)
+    }
+
+    @ViewBuilder
+    private var errorBanner: some View {
+        let iconColor: Color = {
+            switch errorKind {
+            case .needsLogin: .blue
+            case .cookieExpired: .orange
+            case .rateLimited: .yellow
+            case .apiError: .red
+            case .none: .secondary
+            }
+        }()
+
+        HStack(alignment: .top, spacing: 6) {
+            Image(systemName: errorKind.icon)
+                .foregroundStyle(iconColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(errorKind.title)
+                    .font(.caption.weight(.medium))
+                Text(errorDetail)
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    /// Only show burn rate if you'd hit 100% before the window resets.
+    private func showBurnRate(rate: BurnRate, resetAt: Date?) -> Bool {
+        guard let resetAt else { return true }
+        let hoursUntilReset = resetAt.timeIntervalSinceNow / 3600
+        return rate.hoursToFull < hoursUntilReset
+    }
+
+    private var errorDetail: String {
+        switch errorKind {
+        case .needsLogin:
+            snapshot.providerID == .claude
+                ? "Run `claude` then `/login`, or set a cookie in Settings"
+                : "Run `codex --login`"
+        case .cookieExpired:
+            "Re-authenticate to resume tracking"
+        case .rateLimited:
+            "Will retry automatically"
+        case .apiError:
+            snapshot.notes.first ?? "Unknown error"
+        case .none:
+            ""
+        }
+    }
+}
+
+/// A minimal sparkline rendered as a stroked path with a subtle gradient fill.
+struct SparklineView: View {
+    let values: [Double]
+    let tint: Color
+
+    var body: some View {
+        GeometryReader { geo in
+            let w = geo.size.width
+            let h = geo.size.height
+            let lo = max((values.min() ?? 0) - 2, 0)
+            let hi = min((values.max() ?? 100) + 2, 100)
+            let range = max(hi - lo, 1)
+
+            let points: [CGPoint] = values.enumerated().map { i, v in
+                let x = values.count == 1 ? w / 2 : w * CGFloat(i) / CGFloat(values.count - 1)
+                let y = h - h * CGFloat((v - lo) / range)
+                return CGPoint(x: x, y: y)
+            }
+
+            // Fill
+            Path { path in
+                path.move(to: CGPoint(x: points[0].x, y: h))
+                for pt in points { path.addLine(to: pt) }
+                path.addLine(to: CGPoint(x: points.last!.x, y: h))
+                path.closeSubpath()
+            }
+            .fill(
+                LinearGradient(
+                    colors: [tint.opacity(0.15), tint.opacity(0.02)],
+                    startPoint: .top, endPoint: .bottom
+                )
+            )
+
+            // Line
+            Path { path in
+                path.move(to: points[0])
+                for pt in points.dropFirst() { path.addLine(to: pt) }
+            }
+            .stroke(tint.opacity(0.6), lineWidth: 1)
+        }
     }
 }
 
