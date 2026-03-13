@@ -6,7 +6,32 @@ struct BarIconView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        Image(nsImage: renderBarImage())
+        HStack(spacing: 3) {
+            Image(nsImage: renderBarImage())
+            if model.showPercentageLabel, let label = percentageLabel {
+                Text(label)
+                    .font(.system(size: 9, weight: .medium).monospacedDigit())
+                    .foregroundStyle(.primary)
+            }
+        }
+    }
+
+    private var percentageLabel: String? {
+        switch model.displayMode {
+        case .single:
+            let snap = model.providerSnapshot(for: model.singleBarProvider)
+            guard let peak = snap.peakPercent else { return nil }
+            return "\(Int(peak))%"
+        case .dual:
+            let c = model.snapshot.claude.peakPercent
+            let x = model.snapshot.codex.peakPercent
+            switch (c, x) {
+            case let (c?, x?): return "\(Int(c))\u{b7}\(Int(x))"
+            case let (c?, nil): return "\(Int(c))%"
+            case let (nil, x?): return "\(Int(x))%"
+            case (nil, nil): return nil
+            }
+        }
     }
 
     private func renderBarImage() -> NSImage {

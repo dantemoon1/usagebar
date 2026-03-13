@@ -82,6 +82,28 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
         fiveHourWindow != nil || sevenDayWindow != nil
     }
 
+    public var errorKind: ErrorKind {
+        guard !isAvailable else { return .none }
+        if isAuthError {
+            // Distinguish "no credentials at all" from "credentials expired"
+            let hasLoginHint = notes.contains { $0.contains("No credentials") || $0.contains("Set a browser cookie") || $0.contains("missing org ID") }
+            return hasLoginHint ? .needsLogin : .cookieExpired
+        }
+        if notes.contains(where: { $0.lowercased().contains("rate limit") }) {
+            return .rateLimited
+        }
+        if !notes.isEmpty {
+            return .apiError
+        }
+        return .needsLogin // fallback for unavailable with no notes
+    }
+
+    /// The highest usage percentage across all windows, or nil if unavailable.
+    public var peakPercent: Double? {
+        [fiveHourWindow?.usedPercent, sevenDayWindow?.usedPercent]
+            .compactMap { $0 }.max()
+    }
+
     public func window(for kind: QuotaWindowKind) -> QuotaWindowSnapshot? {
         switch kind {
         case .fiveHour: fiveHourWindow
@@ -99,6 +121,34 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
             notes: notes,
             isAuthError: isAuthError
         )
+    }
+}
+
+public enum ErrorKind: Equatable, Sendable {
+    case none
+    case needsLogin
+    case cookieExpired
+    case rateLimited
+    case apiError
+
+    public var icon: String {
+        switch self {
+        case .none: "checkmark.circle"
+        case .needsLogin: "person.crop.circle.badge.questionmark"
+        case .cookieExpired: "key.slash"
+        case .rateLimited: "hourglass"
+        case .apiError: "exclamationmark.icloud"
+        }
+    }
+
+    public var title: String {
+        switch self {
+        case .none: ""
+        case .needsLogin: "Setup required"
+        case .cookieExpired: "Session expired"
+        case .rateLimited: "Rate limited"
+        case .apiError: "Service error"
+        }
     }
 }
 

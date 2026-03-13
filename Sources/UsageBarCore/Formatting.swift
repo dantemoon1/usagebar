@@ -41,6 +41,19 @@ public enum UsageBarFormatting {
         return formatter.string(from: NSNumber(value: value)) ?? "\(value)"
     }
 
+    /// Countdown text for cooldown mode, e.g. "1h 23m" or "45m".
+    public static func countdownText(until date: Date) -> String? {
+        let seconds = date.timeIntervalSinceNow
+        guard seconds > 0 else { return nil }
+        let totalMinutes = Int(seconds / 60)
+        let h = totalMinutes / 60
+        let m = totalMinutes % 60
+        if h > 0 {
+            return "\(h)h \(m)m"
+        }
+        return "\(max(m, 1))m"
+    }
+
     public static func currencyUSD(_ value: Double) -> String {
         let formatter = NumberFormatter()
         formatter.numberStyle = .currency
