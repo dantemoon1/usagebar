@@ -84,6 +84,9 @@ public struct ProviderSnapshot: Equatable, Sendable, Codable {
 
     public var errorKind: ErrorKind {
         guard !isAvailable else { return .none }
+        if lastUpdatedAt == nil && sourceLabel.localizedCaseInsensitiveContains("loading") {
+            return .none
+        }
         if isAuthError {
             // Distinguish "no credentials at all" from "credentials expired"
             let hasLoginHint = notes.contains { $0.contains("No credentials") || $0.contains("Set a browser cookie") || $0.contains("missing org ID") }

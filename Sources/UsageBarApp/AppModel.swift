@@ -57,7 +57,13 @@ final class AppModel: ObservableObject {
 
     var notificationPreset: NotificationPreset {
         get { NotificationPreset(rawValue: notificationPresetRaw) ?? .standard }
-        set { notificationPresetRaw = newValue.rawValue; objectWillChange.send() }
+        set {
+            guard notificationPresetRaw != newValue.rawValue else { return }
+            notificationPresetRaw = newValue.rawValue
+            notifiedThresholds.removeAll()
+            hasSeededThresholds = false
+            objectWillChange.send()
+        }
     }
 
     var displayMode: DisplayMode {

@@ -5,6 +5,18 @@ struct DashboardMenuView: View {
     @ObservedObject var model: AppModel
     @Environment(\.openWindow) private var openWindow
 
+    private var appVersionText: String {
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+        if let shortVersion, !shortVersion.isEmpty {
+            if let buildVersion, !buildVersion.isEmpty, buildVersion != shortVersion {
+                return "v\(shortVersion) (\(buildVersion))"
+            }
+            return "v\(shortVersion)"
+        }
+        return "v?"
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
@@ -36,7 +48,7 @@ struct DashboardMenuView: View {
 
                 Spacer()
 
-                Text("v0.3")
+                Text(appVersionText)
                     .font(.caption2)
                     .foregroundStyle(.tertiary)
 

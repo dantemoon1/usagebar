@@ -3,6 +3,7 @@ import Foundation
 /// Lightweight rolling history of usage percentages for sparklines.
 /// Stores up to 24h of samples in a flat JSON array file.
 public struct UsageHistory: Sendable {
+    private static let resetDropThreshold = 1.0
     private static let fileURL: URL = {
         let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".usagebar")
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -42,15 +43,14 @@ public struct UsageHistory: Sendable {
     /// Computes burn rate from recent history.
     /// Returns `nil` if there isn't enough data or usage is flat/decreasing.
     public func burnRate(provider: ProviderID, window: QuotaWindowKind, currentPercent: Double) -> BurnRate? {
-        let entries = load()
-        // Need at least 2 entries spanning some time
-        let relevant = entries.compactMap { e -> (Date, Double)? in
+        let relevant = load().compactMap { e -> (Date, Double)? in
             guard let v = e.value(provider: provider, window: window) else { return nil }
             return (e.timestamp, v)
         }
-        guard relevant.count >= 2,
-              let first = relevant.first,
-              let last = relevant.last else { return nil }
+        guard let segment = currentSegment(from: relevant),
+              segment.count >= 2,
+              let first = segment.first,
+              let last = segment.last else { return nil }
 
         let elapsed = last.0.timeIntervalSince(first.0)
         guard elapsed > 60 else { return nil } // need at least a minute of data
@@ -64,6 +64,26 @@ public struct UsageHistory: Sendable {
 
         let hoursToFull = remaining / ratePerHour
         return BurnRate(percentPerHour: ratePerHour, hoursToFull: hoursToFull)
+    }
+
+    private func currentSegment(from relevant: [(Date, Double)]) -> [(Date, Double)]? {
+        guard !relevant.isEmpty else { return nil }
+
+        var startIndex = relevant.startIndex
+        for index in relevant.indices.dropFirst() {
+            let previous = relevant[relevant.index(before: index)].1
+            let current = relevant[index].1
+            if current + Self.resetDropThreshold < previous {
+                startIndex = index
+            }
+        }
+
+        let segment = Array(relevant[startIndex...])
+        guard segment.count >= 2,
+              let first = segment.first,
+              let last = segment.last,
+              last.0.timeIntervalSince(first.0) > 0 else { return nil }
+        return segment
     }
 }
 

@@ -6,32 +6,30 @@ struct BarIconView: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
-        HStack(spacing: 3) {
-            Image(nsImage: renderBarImage())
-            if model.showPercentageLabel, let label = percentageLabel {
-                Text(label)
-                    .font(.system(size: 9, weight: .medium).monospacedDigit())
-                    .foregroundStyle(.primary)
-            }
-        }
+        Image(nsImage: renderBarImage())
     }
 
-    private var percentageLabel: String? {
-        switch model.displayMode {
-        case .single:
-            let snap = model.providerSnapshot(for: model.singleBarProvider)
-            guard let peak = snap.peakPercent else { return nil }
-            return "\(Int(peak))%"
-        case .dual:
-            let c = model.snapshot.claude.peakPercent
-            let x = model.snapshot.codex.peakPercent
-            switch (c, x) {
-            case let (c?, x?): return "\(Int(c))\u{b7}\(Int(x))"
-            case let (c?, nil): return "\(Int(c))%"
-            case let (nil, x?): return "\(Int(x))%"
-            case (nil, nil): return nil
-            }
-        }
+    private struct LabelSpec {
+        let text: String
+        let color: NSColor
+        let font: NSFont
+    }
+
+    private func displayedPercent(for providerID: ProviderID) -> Double? {
+        let snapshot = model.providerSnapshot(for: providerID)
+        let window = snapshot.fiveHourWindow ?? snapshot.sevenDayWindow
+        return window?.usedPercent
+    }
+
+    private func labelSpec(for providerID: ProviderID) -> LabelSpec? {
+        guard model.showPercentageLabel,
+              let percent = displayedPercent(for: providerID) else { return nil }
+        let fontSize: CGFloat = model.displayMode == .dual ? 8 : 9
+        return LabelSpec(
+            text: "\(Int(percent))%",
+            color: barTint(for: providerID),
+            font: .monospacedDigitSystemFont(ofSize: fontSize, weight: .medium)
+        )
     }
 
     private func renderBarImage() -> NSImage {
@@ -40,12 +38,19 @@ struct BarIconView: View {
         let cornerRadius: CGFloat = 3
         let spacing: CGFloat = 3
         let padding: CGFloat = 1
+        let labelGap: CGFloat = model.showPercentageLabel ? 4 : 0
+        let claudeLabel = model.displayMode == .dual ? labelSpec(for: .claude) : nil
+        let codexLabel = model.displayMode == .dual ? labelSpec(for: .codex) : nil
+        let singleLabel = model.displayMode == .single ? labelSpec(for: model.singleBarProvider) : nil
+        let maxLabelWidth = [claudeLabel, codexLabel, singleLabel]
+            .compactMap { labelWidth(for: $0) }
+            .max() ?? 0
 
         let isDual = model.displayMode == .dual
         let totalHeight = isDual ? barHeight * 2 + spacing + padding * 2 : barHeight + padding * 2
-        let totalWidth = barWidth + padding * 2
+        let totalWidth = barWidth + padding * 2 + (maxLabelWidth > 0 ? labelGap + maxLabelWidth : 0)
 
-        let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { rect in
+        let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
             NSGraphicsContext.current?.cgContext.setShouldAntialias(true)
 
             let bars: [(fill: CGFloat, tint: NSColor)]
@@ -90,6 +95,21 @@ struct BarIconView: View {
                 }
             }
 
+            let labelX = padding + barWidth + labelGap
+            switch model.displayMode {
+            case .single:
+                if let singleLabel {
+                    drawLabel(singleLabel, x: labelX, midY: totalHeight / 2)
+                }
+            case .dual:
+                if let claudeLabel {
+                    drawLabel(claudeLabel, x: labelX, midY: padding + barHeight + spacing + (barHeight / 2))
+                }
+                if let codexLabel {
+                    drawLabel(codexLabel, x: labelX, midY: padding + (barHeight / 2))
+                }
+            }
+
             return true
         }
 
@@ -97,23 +117,42 @@ struct BarIconView: View {
         return image
     }
 
+    private func labelWidth(for spec: LabelSpec?) -> CGFloat? {
+        guard let spec else { return nil }
+        return attributedLabel(spec).size().width
+    }
+
+    private func drawLabel(_ spec: LabelSpec, x: CGFloat, midY: CGFloat) {
+        let attr = attributedLabel(spec)
+        let size = attr.size()
+        let origin = CGPoint(x: x, y: midY - size.height / 2)
+        attr.draw(at: origin)
+    }
+
+    private func attributedLabel(_ spec: LabelSpec) -> NSAttributedString {
+        NSAttributedString(string: spec.text, attributes: [
+            .font: spec.font,
+            .foregroundColor: spec.color,
+        ])
+    }
+
     private func barConfig(for providerID: ProviderID) -> (fill: CGFloat, tint: NSColor) {
-        let snapshot = model.providerSnapshot(for: providerID)
-        let window = snapshot.fiveHourWindow ?? snapshot.sevenDayWindow
-        let fill = CGFloat((window?.usedPercent ?? 0) / 100)
-        let tint: NSColor
+        let fill = CGFloat((displayedPercent(for: providerID) ?? 0) / 100)
+        return (fill, barTint(for: providerID))
+    }
+
+    private func barTint(for providerID: ProviderID) -> NSColor {
         switch model.colorMode {
         case .color:
             switch providerID {
             case .claude:
-                tint = NSColor(red: 0.92, green: 0.43, blue: 0.18, alpha: 1.0)
+                return NSColor(red: 0.92, green: 0.43, blue: 0.18, alpha: 1.0)
             case .codex:
-                tint = NSColor.labelColor
+                return NSColor.labelColor
             }
         case .monochrome:
-            tint = NSColor.labelColor
+            return NSColor.labelColor
         }
-        return (fill, tint)
     }
 }
 
