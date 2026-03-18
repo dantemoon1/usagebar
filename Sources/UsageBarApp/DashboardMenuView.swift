@@ -257,6 +257,7 @@ private struct ProviderCardView: View {
 
     /// Only show burn rate if you'd hit 100% before the window resets.
     private func showBurnRate(rate: BurnRate, resetAt: Date?) -> Bool {
+        guard rate.isActionable else { return false }
         guard let resetAt else { return true }
         let hoursUntilReset = resetAt.timeIntervalSinceNow / 3600
         return rate.hoursToFull < hoursUntilReset

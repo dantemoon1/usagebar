@@ -89,6 +89,8 @@ public struct UsageHistory: Sendable {
 }
 
 public struct BurnRate: Sendable {
+    public static let actionableProjectionThresholdHours: Double = 12
+
     public let percentPerHour: Double
     public let hoursToFull: Double
 
@@ -103,6 +105,10 @@ public struct BurnRate: Sendable {
             return "~\(h)h \(m)m to 100%"
         }
         return "~\(m)m to 100%"
+    }
+
+    public var isActionable: Bool {
+        hoursToFull <= Self.actionableProjectionThresholdHours
     }
 }
 
