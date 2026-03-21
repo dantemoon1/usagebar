@@ -28,8 +28,7 @@ public struct CursorAPIProvider: ProviderSnapshotLoader {
                 throw ProviderError.rateLimited
             }
 
-            let body = String(data: data, encoding: .utf8) ?? ""
-            throw ProviderError.apiError("Cursor API returned \(status): \(body)")
+            throw ProviderError.apiError("Cursor API returned \(status). Please try again later.")
         } catch let error as ProviderError {
             return .unavailable(providerID: .cursor, sourceLabel: "Cursor API", notes: [error.userMessage], isAuthError: error.isAuthError)
         } catch {
