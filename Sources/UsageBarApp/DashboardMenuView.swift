@@ -37,6 +37,14 @@ struct DashboardMenuView: View {
                 sparklinesEnabled: model.sparklinesEnabled
             )
 
+            ProviderCardView(
+                title: "Cursor",
+                snapshot: model.snapshot.cursor,
+                tint: BarPalette.tint(for: .cursor, mode: model.colorMode),
+                history: model.usageHistory,
+                sparklinesEnabled: model.sparklinesEnabled
+            )
+
             Divider()
 
             HStack {
@@ -98,21 +106,31 @@ private struct ProviderCardView: View {
     let tint: Color
     var history: UsageHistory? = nil
     var sparklinesEnabled: Bool = true
+    @State private var isHovered = false
 
     private var errorKind: ErrorKind { snapshot.errorKind }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text(title)
-                .font(.subheadline.weight(.semibold))
+            HStack {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                if isHovered, snapshot.providerID.usageURL != nil {
+                    Image(systemName: "arrow.up.right")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                }
+            }
 
             if errorKind != .none {
                 errorBanner
             }
 
-            if snapshot.fiveHourWindow != nil || snapshot.sevenDayWindow != nil {
-                quotaRow(for: .fiveHour)
-                quotaRow(for: .sevenDay)
+            if !snapshot.windows.isEmpty {
+                ForEach(snapshot.windows, id: \.kind) { window in
+                    quotaRow(window: window)
+                }
             }
 
             ForEach(snapshot.metrics) { metric in
@@ -140,27 +158,28 @@ private struct ProviderCardView: View {
         .padding(10)
         .background {
             RoundedRectangle(cornerRadius: 8)
-                .fill(Color.primary.opacity(0.04))
+                .fill(Color.primary.opacity(isHovered ? 0.08 : 0.04))
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 8))
+        .onHover { isHovered = $0 }
+        .onTapGesture {
+            if let url = snapshot.providerID.usageURL {
+                NSWorkspace.shared.open(url)
+            }
         }
     }
 
     @ViewBuilder
-    private func quotaRow(for kind: QuotaWindowKind) -> some View {
-        let window = snapshot.window(for: kind)
+    private func quotaRow(window: QuotaWindowSnapshot) -> some View {
+        let kind = window.kind
 
         VStack(alignment: .leading, spacing: 3) {
             HStack {
                 Text(kind.displayName)
                     .font(.caption.weight(.medium))
                 Spacer()
-                if let window {
-                    Text("\(Int(window.usedPercent))% used")
-                        .font(.caption.monospacedDigit())
-                } else {
-                    Text("—")
-                        .font(.caption)
-                        .foregroundStyle(.tertiary)
-                }
+                Text("\(Int(window.usedPercent))% used")
+                    .font(.caption.monospacedDigit())
             }
 
             GeometryReader { geometry in
@@ -168,16 +187,14 @@ private struct ProviderCardView: View {
                     Capsule()
                         .fill(Color.primary.opacity(0.08))
 
-                    if let window {
-                        Capsule()
-                            .fill(tint)
-                            .frame(width: geometry.size.width * CGFloat(window.usedPercent / 100))
-                    }
+                    Capsule()
+                        .fill(tint)
+                        .frame(width: geometry.size.width * CGFloat(window.usedPercent / 100))
                 }
             }
             .frame(height: 6)
 
-            if sparklinesEnabled, let history, window != nil {
+            if sparklinesEnabled, let history {
                 let values = history.values(provider: snapshot.providerID, window: kind)
                 if values.count >= 2 {
                     SparklineView(values: values, tint: tint)
@@ -185,37 +202,35 @@ private struct ProviderCardView: View {
                 }
             }
 
-            if let window {
-                if window.usedPercent >= 100, let resetAt = window.resetAt,
-                   let countdown = UsageBarFormatting.countdownText(until: resetAt) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "hourglass")
-                            .foregroundStyle(.orange)
-                        Text("Resets in \(countdown)")
-                    }
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(.secondary)
-                } else {
-                    HStack(spacing: 4) {
-                        if let resetAt = window.resetAt {
-                            let resetText = kind == .fiveHour
-                                ? UsageBarFormatting.shortResetText(for: resetAt)
-                                : UsageBarFormatting.longResetText(for: resetAt)
-                            Text("Resets \(resetText)")
-                        }
-                        if let history,
-                           let rate = history.burnRate(provider: snapshot.providerID, window: kind, currentPercent: window.usedPercent),
-                           showBurnRate(rate: rate, resetAt: window.resetAt) {
-                            if window.resetAt != nil {
-                                Text("·")
-                            }
-                            Text(rate.projectionText)
-                                .foregroundStyle(.orange.opacity(0.8))
-                        }
-                    }
-                    .font(.caption2)
-                    .foregroundStyle(.tertiary)
+            if window.usedPercent >= 100, let resetAt = window.resetAt,
+               let countdown = UsageBarFormatting.countdownText(until: resetAt) {
+                HStack(spacing: 4) {
+                    Image(systemName: "hourglass")
+                        .foregroundStyle(.orange)
+                    Text("Resets in \(countdown)")
                 }
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 4) {
+                    if let resetAt = window.resetAt {
+                        let resetText = kind == .fiveHour
+                            ? UsageBarFormatting.shortResetText(for: resetAt)
+                            : UsageBarFormatting.longResetText(for: resetAt)
+                        Text("Resets \(resetText)")
+                    }
+                    if let history,
+                       let rate = history.burnRate(provider: snapshot.providerID, window: kind, currentPercent: window.usedPercent),
+                       showBurnRate(rate: rate, resetAt: window.resetAt) {
+                        if window.resetAt != nil {
+                            Text("·")
+                        }
+                        Text(rate.projectionText)
+                            .foregroundStyle(.orange.opacity(0.8))
+                    }
+                }
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
             }
         }
     }
@@ -266,9 +281,11 @@ private struct ProviderCardView: View {
     private var errorDetail: String {
         switch errorKind {
         case .needsLogin:
-            snapshot.providerID == .claude
-                ? "Run `claude` then `/login`, or set a cookie in Settings"
-                : "Run `codex --login`"
+            switch snapshot.providerID {
+            case .claude: "Run `claude` then `/login`, or set a cookie in Settings"
+            case .codex: "Run `codex --login`"
+            case .cursor: "Install Cursor and sign in"
+            }
         case .cookieExpired:
             "Re-authenticate to resume tracking"
         case .rateLimited:

@@ -41,6 +41,32 @@ public struct UsageHistory: Sendable {
         }
     }
 
+    /// Returns the largest positive usage delta for any window of a provider
+    /// over the given lookback interval. Used by auto mode to detect activity.
+    public func recentPositiveDelta(provider: ProviderID, over interval: TimeInterval = 3600) -> Double {
+        let entries = load()
+        let cutoff = Date().addingTimeInterval(-interval)
+        let recent = entries.filter { $0.timestamp >= cutoff }
+        guard !recent.isEmpty else { return 0 }
+
+        let windows: [QuotaWindowKind] = [.fiveHour, .sevenDay, .monthly]
+        var maxDelta = 0.0
+
+        for window in windows {
+            let values = recent.compactMap { e -> (Date, Double)? in
+                guard let v = e.value(provider: provider, window: window) else { return nil }
+                return (e.timestamp, v)
+            }
+            guard let segment = currentSegment(from: values),
+                  let first = segment.first,
+                  let last = segment.last else { continue }
+            let delta = last.1 - first.1
+            if delta > maxDelta { maxDelta = delta }
+        }
+
+        return maxDelta
+    }
+
     /// Computes burn rate from recent history.
     /// Returns `nil` if there isn't enough data or usage is flat/decreasing.
     public func burnRate(provider: ProviderID, window: QuotaWindowKind, currentPercent: Double) -> BurnRate? {
@@ -118,6 +144,7 @@ public struct HistoryEntry: Codable, Sendable {
     public let claudeSevenDay: Double?
     public let codexFiveHour: Double?
     public let codexSevenDay: Double?
+    public let cursorMonthly: Double?
 
     public init(snapshot: UsageDashboardSnapshot) {
         self.timestamp = snapshot.refreshedAt
@@ -125,6 +152,7 @@ public struct HistoryEntry: Codable, Sendable {
         self.claudeSevenDay = snapshot.claude.sevenDayWindow?.usedPercent
         self.codexFiveHour = snapshot.codex.fiveHourWindow?.usedPercent
         self.codexSevenDay = snapshot.codex.sevenDayWindow?.usedPercent
+        self.cursorMonthly = snapshot.cursor.window(for: .monthly)?.usedPercent
     }
 
     public func value(provider: ProviderID, window: QuotaWindowKind) -> Double? {
@@ -133,6 +161,8 @@ public struct HistoryEntry: Codable, Sendable {
         case (.claude, .sevenDay): claudeSevenDay
         case (.codex, .fiveHour): codexFiveHour
         case (.codex, .sevenDay): codexSevenDay
+        case (.cursor, .monthly): cursorMonthly
+        default: nil
         }
     }
 }

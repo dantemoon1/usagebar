@@ -13,10 +13,14 @@ final class AppModel: ObservableObject {
     @AppStorage("sparklinesEnabled") var sparklinesEnabled = false
     @AppStorage("showPercentageLabel") var showPercentageLabel = false
     @AppStorage("notificationPreset") var notificationPresetRaw = NotificationPreset.standard.rawValue
+    @AppStorage("barStrategy") var barStrategyRaw = BarStrategy.auto.rawValue
+    @AppStorage("manualDualFirst") var manualDualFirstRaw = ProviderID.claude.rawValue
+    @AppStorage("manualDualSecond") var manualDualSecondRaw = ProviderID.codex.rawValue
 
     @Published private(set) var snapshot = UsageDashboardSnapshot(
         claude: .unavailable(providerID: .claude, sourceLabel: "Loading..."),
         codex: .unavailable(providerID: .codex, sourceLabel: "Loading..."),
+        cursor: .unavailable(providerID: .cursor, sourceLabel: "Loading..."),
         refreshedAt: Date()
     )
     @Published var claudeCookie: String = ""
@@ -25,6 +29,7 @@ final class AppModel: ObservableObject {
     @Published private(set) var isRefreshing = false
     @Published private(set) var claudeFailures = 0
     @Published private(set) var codexFailures = 0
+    @Published private(set) var cursorFailures = 0
 
     private let coordinator = TelemetryCoordinator()
     let usageHistory = UsageHistory()
@@ -81,6 +86,86 @@ final class AppModel: ObservableObject {
         set { colorModeRawValue = newValue.rawValue; objectWillChange.send() }
     }
 
+    /// Forces color when auto mode can dynamically reorder bars.
+    var effectiveColorMode: ColorMode {
+        barStrategy == .auto ? .color : colorMode
+    }
+
+    var barStrategy: BarStrategy {
+        get { BarStrategy(rawValue: barStrategyRaw) ?? .auto }
+        set { barStrategyRaw = newValue.rawValue; objectWillChange.send() }
+    }
+
+    var manualDualFirst: ProviderID {
+        get { ProviderID(rawValue: manualDualFirstRaw) ?? .claude }
+        set {
+            manualDualFirstRaw = newValue.rawValue
+            if manualDualSecondRaw == newValue.rawValue {
+                manualDualSecondRaw = fallbackManualProvider(excluding: newValue).rawValue
+            }
+            objectWillChange.send()
+        }
+    }
+
+    var manualDualSecond: ProviderID {
+        get { ProviderID(rawValue: manualDualSecondRaw) ?? .codex }
+        set {
+            manualDualSecondRaw = newValue.rawValue
+            if manualDualFirstRaw == newValue.rawValue {
+                manualDualFirstRaw = fallbackManualProvider(excluding: newValue).rawValue
+            }
+            objectWillChange.send()
+        }
+    }
+
+    /// Minimum positive delta (%) to count a provider as "active" in auto mode.
+    private static let autoMinDelta = 0.5
+
+    /// Returns the ordered list of providers to show in the menu bar.
+    var activeBarProviders: [ProviderID] {
+        let maxBars = displayMode == .dual ? 2 : 1
+        switch barStrategy {
+        case .auto:
+            let available = ProviderID.allCases
+                .filter { providerSnapshot(for: $0).hasQuotaData }
+
+            // Providers with meaningful recent usage increase
+            let active = available
+                .map { ($0, usageHistory.recentPositiveDelta(provider: $0)) }
+                .filter { $0.1 >= Self.autoMinDelta }
+                .sorted { $0.1 > $1.1 }
+                .map { $0.0 }
+
+            // Fill active slots first, then fall back to highest current usage
+            var result = Array(active.prefix(maxBars))
+            if result.count < maxBars {
+                let remaining = available
+                    .filter { !result.contains($0) }
+                    .sorted { (providerSnapshot(for: $0).peakPercent ?? -1) > (providerSnapshot(for: $1).peakPercent ?? -1) }
+                result.append(contentsOf: remaining.prefix(maxBars - result.count))
+            }
+            return result.isEmpty ? [.claude] : result
+        case .manual:
+            if displayMode == .single {
+                return [singleBarProvider]
+            } else {
+                return sanitizedManualDualProviders
+            }
+        }
+    }
+
+    private var sanitizedManualDualProviders: [ProviderID] {
+        let first = manualDualFirst
+        let second = manualDualSecond == first
+            ? fallbackManualProvider(excluding: first)
+            : manualDualSecond
+        return [first, second]
+    }
+
+    private func fallbackManualProvider(excluding provider: ProviderID) -> ProviderID {
+        ProviderID.allCases.first(where: { $0 != provider }) ?? provider
+    }
+
     var barWidth: Double {
         get { min(max(barWidthRaw, 20), 60) }
         set { barWidthRaw = min(max(newValue, 20), 60); objectWillChange.send() }
@@ -98,6 +183,9 @@ final class AppModel: ObservableObject {
 
             if updated.codex.isAvailable { codexFailures = 0 }
             else if updated.codex.isAuthError { codexFailures += 1 }
+
+            if updated.cursor.isAvailable { cursorFailures = 0 }
+            else if updated.cursor.isAuthError { cursorFailures += 1 }
 
             // Keep old good data on transient errors, but replace after threshold
             let claude: ProviderSnapshot
@@ -118,7 +206,16 @@ final class AppModel: ObservableObject {
                 codex = updated.codex
             }
 
-            let newSnapshot = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: updated.refreshedAt)
+            let cursor: ProviderSnapshot
+            if updated.cursor.isAvailable {
+                cursor = updated.cursor
+            } else if snapshot.cursor.isAvailable && cursorFailures < Self.failureThreshold {
+                cursor = snapshot.cursor
+            } else {
+                cursor = updated.cursor
+            }
+
+            let newSnapshot = UsageDashboardSnapshot(claude: claude, codex: codex, cursor: cursor, refreshedAt: updated.refreshedAt)
             self.snapshot = newSnapshot
             self.usageHistory.record(updated)
             self.checkNotifications(for: newSnapshot)
@@ -130,6 +227,7 @@ final class AppModel: ObservableObject {
         switch providerID {
         case .claude: snapshot.claude
         case .codex: snapshot.codex
+        case .cursor: snapshot.cursor
         }
     }
 
@@ -193,8 +291,8 @@ final class AppModel: ObservableObject {
         let isFirstCheck = !hasSeededThresholds
         if isFirstCheck { hasSeededThresholds = true }
 
-        for provider in [snapshot.claude, snapshot.codex] {
-            for window in [provider.fiveHourWindow, provider.sevenDayWindow].compactMap({ $0 }) {
+        for provider in [snapshot.claude, snapshot.codex, snapshot.cursor] {
+            for window in provider.windows {
                 let key = "\(provider.providerID.rawValue)-\(window.kind.rawValue)"
                 let percent = Int(window.usedPercent)
 
@@ -260,12 +358,9 @@ final class AppModel: ObservableObject {
 
     /// Returns refresh interval: 60s when any window is above 80%, 180s otherwise.
     private var adaptiveRefreshInterval: Int {
-        let maxUsage = [
-            snapshot.claude.fiveHourWindow?.usedPercent,
-            snapshot.claude.sevenDayWindow?.usedPercent,
-            snapshot.codex.fiveHourWindow?.usedPercent,
-            snapshot.codex.sevenDayWindow?.usedPercent,
-        ].compactMap { $0 }.max() ?? 0
+        let allWindows = [snapshot.claude, snapshot.codex, snapshot.cursor]
+            .flatMap(\.windows)
+        let maxUsage = allWindows.map(\.usedPercent).max() ?? 0
         return maxUsage >= 80 ? 60 : 180
     }
 
@@ -297,6 +392,22 @@ enum DisplayMode: String, CaseIterable {
         switch self {
         case .single: "Single Bar"
         case .dual: "Dual Bar"
+        }
+    }
+}
+
+enum BarStrategy: String, CaseIterable {
+    case auto, manual
+    var title: String {
+        switch self {
+        case .auto: "Auto"
+        case .manual: "Manual"
+        }
+    }
+    var caption: String {
+        switch self {
+        case .auto: "Shows actively used providers, falls back to highest usage"
+        case .manual: "Choose which providers to display"
         }
     }
 }
