@@ -12,7 +12,7 @@ public struct CursorAPIProvider: ProviderSnapshotLoader {
 
     public func loadSnapshot(now: Date) async -> ProviderSnapshot {
         do {
-            let cred = try loadCredential()
+            let cred = try await loadCredential()
             let (data, resp) = try await fetchUsageSummary(cookie: cred.cookie)
             let status = resp?.statusCode ?? 0
 
@@ -45,7 +45,7 @@ public struct CursorAPIProvider: ProviderSnapshotLoader {
         var cookie: String { "\(userId)%3A%3A\(accessToken)" }
     }
 
-    private func loadCredential() throws -> Credential {
+    private func loadCredential() async throws -> Credential {
         let dbPath = homeDirectory
             .appendingPathComponent("Library/Application Support/Cursor/User/globalStorage/state.vscdb")
             .path
@@ -54,7 +54,7 @@ public struct CursorAPIProvider: ProviderSnapshotLoader {
             throw ProviderError.noCredentials("No credentials found for Cursor. Install Cursor and sign in.")
         }
 
-        let accessToken = try runSqlite(dbPath: dbPath, query: "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken';")
+        let accessToken = try await runSqlite(dbPath: dbPath, query: "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken';")
         guard !accessToken.isEmpty else {
             throw ProviderError.noCredentials("No credentials found for Cursor. Sign in to Cursor.")
         }
@@ -63,20 +63,29 @@ public struct CursorAPIProvider: ProviderSnapshotLoader {
         return Credential(userId: userId, accessToken: accessToken)
     }
 
-    private func runSqlite(dbPath: String, query: String) throws -> String {
+    private func runSqlite(dbPath: String, query: String) async throws -> String {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/sqlite3")
         process.arguments = ["-readonly", "-noheader", "-batch", dbPath, query]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()
-        try process.run()
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else {
-            throw ProviderError.apiError("Failed to read Cursor database")
+        return try await withCheckedThrowingContinuation { continuation in
+            process.terminationHandler = { proc in
+                guard proc.terminationStatus == 0 else {
+                    continuation.resume(throwing: ProviderError.apiError("Failed to read Cursor database"))
+                    return
+                }
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                let result = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                continuation.resume(returning: result)
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(throwing: error)
+            }
         }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        return String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
     /// Extracts the user ID (e.g. "user_01HV63BC...") from the JWT's `sub` claim.
