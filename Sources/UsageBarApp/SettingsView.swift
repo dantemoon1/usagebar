@@ -3,11 +3,44 @@ import UsageBarCore
 
 struct SettingsView: View {
     @ObservedObject var model: AppModel
+    @State private var selectedTab = 0
 
     var body: some View {
+        VStack(spacing: 0) {
+            Picker("", selection: $selectedTab) {
+                Text("Appearance").tag(0)
+                Text("General").tag(1)
+            }
+            .pickerStyle(.segmented)
+            .padding(.horizontal, 16)
+            .padding(.top, 12)
+            .padding(.bottom, 4)
+
+            Group {
+                if selectedTab == 0 {
+                    appearanceTab
+                } else {
+                    generalTab
+                }
+            }
+            .scrollIndicators(.never)
+        }
+        .frame(width: 420)
+        .fixedSize(horizontal: false, vertical: true)
+        .onAppear {
+            if !model.claudeCookie.isEmpty && model.cookieValidation == .none {
+                model.validateCookie()
+            }
+            model.checkNotificationPermission()
+        }
+    }
+
+    // MARK: - Appearance
+
+    private var appearanceTab: some View {
         Form {
-            Section("Display") {
-                Picker("Mode", selection: Binding(
+            Section("Menu Bar") {
+                Picker("Bars", selection: Binding(
                     get: { model.displayMode },
                     set: { model.displayMode = $0 }
                 )) {
@@ -16,23 +49,47 @@ struct SettingsView: View {
                     }
                 }
 
-                if model.displayMode == .single {
-                    Picker("Provider", selection: Binding(
-                        get: { model.singleBarProvider },
-                        set: { model.singleBarProvider = $0 }
-                    )) {
-                        ForEach(ProviderID.allCases, id: \.self) { p in
-                            Text(p.displayName).tag(p)
-                        }
+                Picker("Selection", selection: Binding(
+                    get: { model.barStrategy },
+                    set: { model.barStrategy = $0 }
+                )) {
+                    ForEach(BarStrategy.allCases, id: \.self) { s in
+                        Text(s.title).tag(s)
                     }
                 }
 
-                Picker("Colors", selection: Binding(
-                    get: { model.colorMode },
-                    set: { model.colorMode = $0 }
-                )) {
-                    ForEach(ColorMode.allCases, id: \.self) { mode in
-                        Text(mode.title).tag(mode)
+                Text(model.barStrategy.caption)
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+
+                if model.barStrategy == .manual {
+                    if model.displayMode == .single {
+                        Picker("Provider", selection: Binding(
+                            get: { model.singleBarProvider },
+                            set: { model.singleBarProvider = $0 }
+                        )) {
+                            ForEach(ProviderID.allCases, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
+                        }
+                    } else {
+                        Picker("Top Bar", selection: Binding(
+                            get: { model.manualDualFirst },
+                            set: { model.manualDualFirst = $0 }
+                        )) {
+                            ForEach(ProviderID.allCases.filter { $0 != model.manualDualSecond || $0 == model.manualDualFirst }, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
+                        }
+
+                        Picker("Bottom Bar", selection: Binding(
+                            get: { model.manualDualSecond },
+                            set: { model.manualDualSecond = $0 }
+                        )) {
+                            ForEach(ProviderID.allCases.filter { $0 != model.manualDualFirst || $0 == model.manualDualSecond }, id: \.self) { p in
+                                Text(p.displayName).tag(p)
+                            }
+                        }
                     }
                 }
 
@@ -45,6 +102,21 @@ struct SettingsView: View {
                         .frame(width: 32, alignment: .trailing)
                 }
 
+                Toggle("Show percentage", isOn: $model.showPercentageLabel)
+
+                if model.barStrategy == .manual {
+                    Picker("Colors", selection: Binding(
+                        get: { model.colorMode },
+                        set: { model.colorMode = $0 }
+                    )) {
+                        ForEach(ColorMode.allCases, id: \.self) { mode in
+                            Text(mode.title).tag(mode)
+                        }
+                    }
+                }
+            }
+
+            Section("Dashboard") {
                 Toggle("Sparklines", isOn: $model.sparklinesEnabled)
 
                 SparklineView(
@@ -57,8 +129,53 @@ struct SettingsView: View {
                 Text("24h usage trend shown per quota window.")
                     .font(.caption)
                     .foregroundStyle(.tertiary)
+            }
+        }
+        .formStyle(.grouped)
+    }
 
-                Toggle("Show percentage in menu bar", isOn: $model.showPercentageLabel)
+    // MARK: - General
+
+    private var generalTab: some View {
+        Form {
+            Section("Notifications") {
+                Toggle("Usage notifications", isOn: Binding(
+                    get: { model.notificationsEnabled },
+                    set: { newValue in
+                        model.notificationsEnabled = newValue
+                        if newValue { model.requestNotificationPermission() }
+                    }
+                ))
+
+                if model.notificationsEnabled {
+                    if model.notificationsDenied {
+                        HStack(spacing: 4) {
+                            Image(systemName: "exclamationmark.triangle.fill")
+                                .foregroundStyle(.orange)
+                            Text("Notifications blocked in System Settings.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("Open") {
+                                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings")!)
+                            }
+                            .font(.caption)
+                            .buttonStyle(.link)
+                        }
+                    } else {
+                        Picker("Thresholds", selection: Binding(
+                            get: { model.notificationPreset },
+                            set: { model.notificationPreset = $0 }
+                        )) {
+                            ForEach(NotificationPreset.allCases, id: \.self) { preset in
+                                Text(preset.title).tag(preset)
+                            }
+                        }
+
+                        Text(model.notificationPreset.caption)
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                    }
+                }
             }
 
             Section("Claude Cookie") {
@@ -106,62 +223,17 @@ struct SettingsView: View {
                 }
             }
 
-            Section("General") {
+            Section {
                 Toggle("Launch at login", isOn: Binding(
                     get: { LaunchAtLogin.isEnabled },
                     set: { LaunchAtLogin.setEnabled($0) }
                 ))
-
-                Toggle("Usage notifications", isOn: Binding(
-                    get: { model.notificationsEnabled },
-                    set: { newValue in
-                        model.notificationsEnabled = newValue
-                        if newValue { model.requestNotificationPermission() }
-                    }
-                ))
-
-                if model.notificationsEnabled {
-                    if model.notificationsDenied {
-                        HStack(spacing: 4) {
-                            Image(systemName: "exclamationmark.triangle.fill")
-                                .foregroundStyle(.orange)
-                            Text("Notifications blocked in System Settings.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                            Button("Open") {
-                                NSWorkspace.shared.open(URL(string: "x-apple.systempreferences:com.apple.Notifications-Settings")!)
-                            }
-                            .font(.caption)
-                            .buttonStyle(.link)
-                        }
-                    } else {
-                        Picker("Thresholds", selection: Binding(
-                            get: { model.notificationPreset },
-                            set: { model.notificationPreset = $0 }
-                        )) {
-                            ForEach(NotificationPreset.allCases, id: \.self) { preset in
-                                Text(preset.title).tag(preset)
-                            }
-                        }
-
-                        Text(model.notificationPreset.caption)
-                            .font(.caption)
-                            .foregroundStyle(.tertiary)
-                    }
-                }
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420)
-        .scrollDisabled(true)
-        .fixedSize(horizontal: false, vertical: true)
-        .onAppear {
-            if !model.claudeCookie.isEmpty && model.cookieValidation == .none {
-                model.validateCookie()
-            }
-            model.checkNotificationPermission()
-        }
     }
+
+    // MARK: - Cookie status
 
     @ViewBuilder
     private var cookieStatusRow: some View {

@@ -17,14 +17,13 @@ struct BarIconView: View {
 
     private func displayedPercent(for providerID: ProviderID) -> Double? {
         let snapshot = model.providerSnapshot(for: providerID)
-        let window = snapshot.fiveHourWindow ?? snapshot.sevenDayWindow
-        return window?.usedPercent
+        return snapshot.windows.first?.usedPercent
     }
 
-    private func labelSpec(for providerID: ProviderID) -> LabelSpec? {
+    private func labelSpec(for providerID: ProviderID, isDual: Bool) -> LabelSpec? {
         guard model.showPercentageLabel,
               let percent = displayedPercent(for: providerID) else { return nil }
-        let fontSize: CGFloat = model.displayMode == .dual ? 8 : 9
+        let fontSize: CGFloat = isDual ? 8 : 9
         return LabelSpec(
             text: "\(Int(percent))%",
             color: barTint(for: providerID),
@@ -33,40 +32,28 @@ struct BarIconView: View {
     }
 
     private func renderBarImage() -> NSImage {
+        let providers = model.activeBarProviders
+        let isDual = providers.count > 1
+
         let barWidth = CGFloat(model.barWidth)
         let barHeight: CGFloat = 6
         let cornerRadius: CGFloat = 3
         let spacing: CGFloat = 3
         let padding: CGFloat = 1
         let labelGap: CGFloat = model.showPercentageLabel ? 4 : 0
-        let claudeLabel = model.displayMode == .dual ? labelSpec(for: .claude) : nil
-        let codexLabel = model.displayMode == .dual ? labelSpec(for: .codex) : nil
-        let singleLabel = model.displayMode == .single ? labelSpec(for: model.singleBarProvider) : nil
-        let maxLabelWidth = [claudeLabel, codexLabel, singleLabel]
-            .compactMap { labelWidth(for: $0) }
-            .max() ?? 0
-        let maxLabelHeight = [claudeLabel, codexLabel, singleLabel]
-            .compactMap { labelHeight(for: $0) }
-            .max() ?? 0
+
+        let labels = providers.map { labelSpec(for: $0, isDual: isDual) }
+        let maxLabelWidth = labels.compactMap { labelWidth(for: $0) }.max() ?? 0
+        let maxLabelHeight = labels.compactMap { labelHeight(for: $0) }.max() ?? 0
         let rowHeight = max(barHeight, maxLabelHeight)
 
-        let isDual = model.displayMode == .dual
         let totalHeight = isDual ? rowHeight * 2 + spacing + padding * 2 : rowHeight + padding * 2
         let totalWidth = barWidth + padding * 2 + (maxLabelWidth > 0 ? labelGap + maxLabelWidth : 0)
 
         let image = NSImage(size: NSSize(width: totalWidth, height: totalHeight), flipped: false) { _ in
             NSGraphicsContext.current?.cgContext.setShouldAntialias(true)
 
-            let bars: [(fill: CGFloat, tint: NSColor)]
-            switch model.displayMode {
-            case .single:
-                let config = barConfig(for: model.singleBarProvider)
-                bars = [(config.fill, config.tint)]
-            case .dual:
-                let claudeConfig = barConfig(for: .claude)
-                let codexConfig = barConfig(for: .codex)
-                bars = [(claudeConfig.fill, claudeConfig.tint), (codexConfig.fill, codexConfig.tint)]
-            }
+            let bars = providers.map { barConfig(for: $0) }
 
             for (index, bar) in bars.enumerated() {
                 let y: CGFloat
@@ -102,18 +89,17 @@ struct BarIconView: View {
             }
 
             let labelX = padding + barWidth + labelGap
-            switch model.displayMode {
-            case .single:
-                if let singleLabel {
-                    drawLabel(singleLabel, x: labelX, midY: padding + rowHeight / 2)
+            for (index, label) in labels.enumerated() {
+                guard let label else { continue }
+                let midY: CGFloat
+                if isDual {
+                    midY = index == 0
+                        ? padding + rowHeight + spacing + rowHeight / 2
+                        : padding + rowHeight / 2
+                } else {
+                    midY = padding + rowHeight / 2
                 }
-            case .dual:
-                if let claudeLabel {
-                    drawLabel(claudeLabel, x: labelX, midY: padding + rowHeight + spacing + rowHeight / 2)
-                }
-                if let codexLabel {
-                    drawLabel(codexLabel, x: labelX, midY: padding + rowHeight / 2)
-                }
+                drawLabel(label, x: labelX, midY: midY)
             }
 
             return true
@@ -153,13 +139,15 @@ struct BarIconView: View {
     }
 
     private func barTint(for providerID: ProviderID) -> NSColor {
-        switch model.colorMode {
+        switch model.effectiveColorMode {
         case .color:
             switch providerID {
             case .claude:
                 return NSColor(red: 0.92, green: 0.43, blue: 0.18, alpha: 1.0)
             case .codex:
                 return NSColor.labelColor
+            case .cursor:
+                return NSColor(red: 0.0, green: 0.72, blue: 0.53, alpha: 1.0)
             }
         case .monochrome:
             return NSColor.labelColor
@@ -176,6 +164,8 @@ enum BarPalette {
                 Color(red: 0.92, green: 0.43, blue: 0.18)
             case .codex:
                 .primary
+            case .cursor:
+                Color(red: 0.0, green: 0.72, blue: 0.53)
             }
         case .monochrome:
             .primary

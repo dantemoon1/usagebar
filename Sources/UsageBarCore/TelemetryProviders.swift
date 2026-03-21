@@ -7,16 +7,19 @@ public protocol ProviderSnapshotLoader: Sendable {
 public struct TelemetryCoordinator: Sendable {
     private let claudeLoader: any ProviderSnapshotLoader
     private let codexLoader: any ProviderSnapshotLoader
+    private let cursorLoader: any ProviderSnapshotLoader
 
     public init() {
         self.claudeLoader = ClaudeAPIProvider()
         self.codexLoader = CodexAPIProvider()
+        self.cursorLoader = CursorAPIProvider()
     }
 
     public func loadSnapshot(now: Date = Date()) async -> UsageDashboardSnapshot {
         async let claude = claudeLoader.loadSnapshot(now: now)
         async let codex = codexLoader.loadSnapshot(now: now)
-        let snapshot = await UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: now)
+        async let cursor = cursorLoader.loadSnapshot(now: now)
+        let snapshot = await UsageDashboardSnapshot(claude: claude, codex: codex, cursor: cursor, refreshedAt: now)
         // Only cache providers that succeeded, preserving last-known-good data for failed ones
         SnapshotCache.saveSelective(snapshot)
         return snapshot
@@ -51,7 +54,9 @@ enum SnapshotCache {
             ? snapshot.claude : (existing?.claude ?? snapshot.claude)
         let codex = snapshot.codex.isAvailable || snapshot.codex.isAuthError
             ? snapshot.codex : (existing?.codex ?? snapshot.codex)
-        let merged = UsageDashboardSnapshot(claude: claude, codex: codex, refreshedAt: snapshot.refreshedAt)
+        let cursor = snapshot.cursor.isAvailable || snapshot.cursor.isAuthError
+            ? snapshot.cursor : (existing?.cursor ?? snapshot.cursor)
+        let merged = UsageDashboardSnapshot(claude: claude, codex: codex, cursor: cursor, refreshedAt: snapshot.refreshedAt)
         save(merged)
     }
 
