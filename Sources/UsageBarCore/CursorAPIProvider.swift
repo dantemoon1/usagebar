@@ -112,6 +112,7 @@ public struct CursorAPIProvider: ProviderSnapshotLoader {
 
     private func fetchUsageSummary(cookie: String) async throws -> (Data, HTTPURLResponse?) {
         var request = URLRequest(url: URL(string: "https://cursor.com/api/usage-summary")!)
+        request.timeoutInterval = 30
         request.setValue("WorkosCursorSessionToken=\(cookie)", forHTTPHeaderField: "Cookie")
         request.setValue("UsageBar/0.2", forHTTPHeaderField: "User-Agent")
         let (data, response) = try await URLSession.shared.data(for: request)
